@@ -1,0 +1,37 @@
+00906a92641c540a64e4e7505012157315314810
+https://github.com/mupen64plus/mupen64plus-rsp-cxd4
+
+Local changes (everything else is unmodified):
+- su.c SP_CP0_MF: MFC0 of the semaphore (CP0 register 7) sets it to 1
+  after reading, unconditionally; upstream does that only with the
+  CFG_MEND_SEMAPHORE_LOCK option, which also forces SP_STATUS.HALT (2026-09-26)
+- su.c run_task exit: halting in a branch delay slot (BREAK there) leaves
+  SP_PC at the branch target instead of the slot (n64-systemtest "RSP BREAK
+  (within delay slot)"; resuming in the slot never halted again) (2026-09-26)
+- su.c run_task: optional instruction budget (cxd4_budget/cxd4_budgetout),
+  so a microcode waiting on the CPU runs in slices beside it instead of
+  looping forever inside one call (2026-09-26)
+
+Changes for n64-systemtest, taken from ares (ares/n64/rsp, commit 4cb8d92b,
+ISC licence) (2026-09-26):
+- su.c: all LWC2/SWC2 vector loads and stores (LBV..LTV, SBV..STV) replaced
+  by byte-at-a-time transcriptions of ares: DMEM wraps at 4 KB, every
+  element/address combination handled; LFV and SWV implemented
+- su.c MTC2: element 15 writes one byte only
+- su.c MT_SP_STATUS: a flag changes only when one of its clear/set bits is
+  written, not both; SET_INTR no longer sets HALT
+- su.c: JALR reads rs before linking (rd == rs); BLTZAL/BGEZAL test rs
+  before linking (rs == ra); LWU is LW
+- vu/vu.c: uh_VABS, uh_VCH, uh_VCR, uh_VMRG replace cxd4's; VMULQ, VMACQ,
+  VRNDP, VRNDN added; the undocumented ops (VADDB..VSUM, VEXTx, VINSx, V30,
+  V31, V46, V47, V59) are ares's VZERO (vd = 0, ACCL = vs + vt); VNULL is
+  VNOP
+- su.c SP_DMA_READ/SP_DMA_WRITE: SP_MEM_ADDR, DRAM_ADDR and the length
+  register are left as the hardware leaves them (sp_dma_done, ares dma.cpp)
+- su.c MT_CMD_START/MT_CMD_END: START latches with DPC_STATUS.START_VALID,
+  END moves it to CURRENT (as the CPU-side writes in lle.c)
+- su.c run_task: the instruction budget is checked in the EMULATE_STATIC_PC
+  build too. The two run_task changes above were under #ifndef
+  EMULATE_STATIC_PC, which su.h defines, so they never took effect; the
+  static-PC loop already resumes at the branch target after a BREAK in a
+  delay slot, because it runs slots inline.

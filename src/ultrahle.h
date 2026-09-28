@@ -1,0 +1,47 @@
+////////////////////////////////////////////////////////////////////////////////
+// UltraHLE - Ultra64 High Level Emulator
+// Copyright (c) 1999, XXX and RealityMan
+// ultrahle.h
+
+#include "stdsdk.h"                    // Standard Win32 API Includes, etc.
+#include "version.h"                   // Version Information
+#include "main.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+// Prototypes
+
+int WINAPI WinMain( HINSTANCE, HINSTANCE, LPSTR, int );
+LRESULT CALLBACK WindowFunc( HWND, UINT, WPARAM, LPARAM );
+INT_PTR CALLBACK AboutDialog( HWND, UINT, WPARAM, LPARAM );
+int ControllerProperties( void );
+INT_PTR CALLBACK Controller1Prop( HWND, UINT, WPARAM, LPARAM );
+
+extern void CreateListView( void );
+extern BOOL UpdateROMList( void );
+extern void CopyDebugLines( int all );
+extern void SelectAllDebugLines( void );
+extern BOOL LoadImageState( BOOL );
+extern BOOL SaveState( void );
+
+// Globals
+
+char szBuffer[ MAX_PATH ];             // Temporary String Buffer
+HANDLE hInst;                          // Global Application Instance
+HWND hwndMain;                         // Handle to the Main App Window
+HWND hwndStatus;                       // Handle to Status Bar
+
+HANDLE mainthread;                     
+LPDWORD mainthreadid;
+
+extern HWND hwndList;                  // Handle to Rom List View
+extern HWND hwndDebug;                 // Handle to Debug List View
+extern ROMLIST *romList;               // Pointer to Rom List Information
+
+extern Init init;
+
+#ifdef __cplusplus
+};
+#endif

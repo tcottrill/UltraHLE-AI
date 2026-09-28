@@ -1,0 +1,21 @@
+# Build output (the release exe is tracked on purpose)
+Build/*
+!Build/UltraHLE64.exe
+!Build/ULTRA.INI
+*.pdb
+*.ilk
+*.obj
+
+# ROMs and user data
+*.z64
+*.n64
+*.v64
+*.zip
+*.sav
+
+# Visual Studio
+.vs/
+*.vcxproj.user
+Scripts/x64/
+Scripts/Debug/
+Scripts/Release/
