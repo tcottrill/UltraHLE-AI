@@ -436,6 +436,12 @@ void dlist_showa0matrix(void)
 /***********************************************************************/
 // display list geometry commands
 
+// G_BRANCH_Z (F3DEX 1.x): each loaded vertex's screen z, 0..1023 as the
+// RSP computes it (z/w through the viewport's z scale and offset); -1 when
+// it is at or behind the eye
+static float g_vxzs[256];
+static float g_vpzscale=511.0f,g_vpztrans=511.0f; // libultra's G_MAXZ/2
+
 void g_viewport(dword pos)
 {
     dword x;
@@ -455,6 +461,9 @@ void g_viewport(dword pos)
     x=mem_read32p(pos+8);
     xa=(short)(x>>16  )*0.25;
     ya=(short)(x&65535)*0.25;
+
+    g_vpzscale=(float)(short)(mem_read32p(pos+4)>>16);
+    g_vpztrans=(float)(short)(mem_read32p(pos+12)>>16);
 
     logd("\n!viewport *(%f,%f)+(%f,%f) z(%f) ",xm,ym,xa,ya,zm);
 
@@ -848,6 +857,11 @@ void g_loadvtx(dword addr,int v0,int vn)
         v->pos[0]=x*m[0+0*4]+y*m[0+1*4]+z*m[0+2*4]+m[0+3*4];
         v->pos[1]=x*m[1+0*4]+y*m[1+1*4]+z*m[1+2*4]+m[1+3*4];
         v->pos[2]=x*m[3+0*4]+y*m[3+1*4]+z*m[3+2*4]+m[3+3*4]; // from W!!
+        if(i<256)
+        {
+            float zc=x*m[2+0*4]+y*m[2+1*4]+z*m[2+2*4]+m[2+3*4];
+            g_vxzs[i]=v->pos[2]>0.0f?zc/v->pos[2]*g_vpzscale+g_vpztrans:-1.0f;
+        }
 
         // clipcheck
         if(v->pos[0]<-v->pos[2]) flag|=VX_CLIPX1;
@@ -2195,6 +2209,19 @@ void rsp_cmd_basic(int c)
             int ind=(cmd[0]>>8)&255;
             int m=(cmd[0]>>0)&15;
             c_moveword(m,ind,cmd[1]);
+        }
+        break;
+    case 0xB0: // G_BRANCH_Z (F3DEX 1.x; GLideN64 gSPBranchLessZ)
+        // a vertex nearer than the depth in w1's top half: branch to the
+        // display list RDPHALF_1 gave (the model's near, detailed version).
+        // Skipped, SF Rush drew every car with its far model and 16x8
+        // textures.
+        if(!cart.dlist_wavevx)
+        {
+            int   vi=(cmd[0]>>1)&0x7ff;
+            float zs=vi<256?g_vxzs[vi]:-1.0f;
+            logd(" branch_z vtx %i z %.1f <= %i ?",vi,zs,cmd[1]>>16);
+            if(zs<0.0f || zs<=(float)(cmd[1]>>16)) c_dlbranch(gst.loadrspdata,1,0);
         }
         break;
     default:

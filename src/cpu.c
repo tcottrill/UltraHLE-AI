@@ -628,8 +628,10 @@ void cpu_exec(qword ops0,int fast)
             st.bailout=num;
             if(st.lleos)
             { // LLE OS mode: deliver interrupts, always interpret
+                prof_begin(PROF_BURST);
                 lle_burststart(num);
                 c_exec();
+                prof_end(PROF_BURST);
                 // a burst cut short (lle_checksoon) counts what ran, not the
                 // whole length: Count raced ahead of the VI, and libdragon's
                 // 200 ms waits for a framebuffer timed out (Flappy Bird)

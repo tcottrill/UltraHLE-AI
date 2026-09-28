@@ -129,7 +129,9 @@ void rsp_run(void)
     // rest runs from lle_burststart while rsp_pending()
     rsp_cxd4_budget(rsp_budget);
     rsp_budget=RSP_START;
+    prof_begin(PROF_RSP);
     rsp_waiting=rsp_cxd4_run();
+    prof_end(PROF_RSP);
     RSP2[0]&=0xffc; // cxd4 keeps SP_PC as an IMEM address; the CPU reads the PC
     rsp_checkinterrupts();
     rsp_dpcresume(); // the RSP may have cleared DPC_STATUS.FREEZE
@@ -212,8 +214,10 @@ void rsp_dpclist(void)
             dword a=cur+i*4;
             w[i]=xbus?*(dword *)(sp.dmem+(a&0xffc)):*(dword *)(mem.ram+(a&(mem.ramsize-1)));
         }
+        prof_begin(PROF_RDP);
         if(inifile_softrdp()) softrdp_cmd(w,n);
         else                  rdp_rawcmd(w,n);
+        prof_end(PROF_RDP);
         if(((w[0]>>24)&0x3f)==0x29)
         { // FULL_SYNC: the frame is done (also reads the pad, counts fps);
           // the pipe goes idle (DPC_STATUS PIPE_BUSY, START_GCLK)

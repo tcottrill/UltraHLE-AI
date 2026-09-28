@@ -241,6 +241,7 @@ typedef struct
     int       tritile;      // G_TEXTURE's tile, for HLE triangles
 
     int       rectmode;
+    int       rectclamp;         // queued texture rectangles sample inside their tile: 1 s, 2 t (x_rectclamp)
     dword     rawfillcolor;
 
     // initdone?
@@ -283,6 +284,7 @@ typedef struct
     int       lastcbufbytes[8];  // their bytes per pixel
     int       lastcbufhig[8];    // their heights: lowest scissor line used (0 = unknown)
     int       lastcbufi;
+    int       lastcbufframe[8];  // rst.myframe when each was last set as the color image
     int       scissorhig;        // current scissor's lower edge in lines
     char     *framegrab;         // RGBA copy of the last presented frame
     int       grabw,grabh;       // its size (init.gfxwid x init.gfxhig)
@@ -580,6 +582,7 @@ static void setbuffer(int i,dword c0,dword c1)
         rst.lastcbufs    [rst.lastcbufi]=addr;
         rst.lastcbufwid  [rst.lastcbufi]=rst.bufwid[i];
         rst.lastcbufbytes[rst.lastcbufi]=bytes;
+        rst.lastcbufframe[rst.lastcbufi]=rst.myframe;
         if(rst.scissorhig>rst.lastcbufhig[rst.lastcbufi])
             rst.lastcbufhig[rst.lastcbufi]=rst.scissorhig;
     }
@@ -605,6 +608,13 @@ static int cbufsource(dword addr)
     if(cbuf_contains(rst.frontcbuf,rst.frontcbufwid,rst.frontcbufbytes,rst.frontcbufhig,addr)) return(1);
     for(j=0;j<8;j++)
     {
+        // not drawn to for 3 frames: the game has reused that memory (games
+        // read a buffer back in the frame that drew it or the next). Rogue
+        // Squadron streams its title picture's tiles through where its intro
+        // buffers were, and those tiles came out as placeholders (dark
+        // blocks) in a session that had played the intro; 30 frames here
+        // left them visible for half a second.
+        if(rst.myframe-rst.lastcbufframe[j]>3) continue;
         if(cbuf_contains(rst.lastcbufs[j],rst.lastcbufwid[j],rst.lastcbufbytes[j],rst.lastcbufhig[j],addr)) return(2);
     }
     return(0);
@@ -1681,7 +1691,10 @@ void txt_fromfb(byte *buf,Tile *t)
     s    =(dword *)rst.framegrab;
     base =rst.frontcbuf&0x1fffffff;
     w    =rst.frontcbufwid;
-    h    =w*3/4;
+    // its height (lowest scissor line), else 3/4 of the width. Rogue
+    // Squadron's 640x224 intro buffers written back as 480 lines
+    // overwrote the game's data after them and it crashed.
+    h    =rst.frontcbufhig>0?rst.frontcbufhig:w*3/4;
     bytes=(1<<t->bpp)>>1;
     if(bytes<1) bytes=1;
     rl   =txt_rl(t);
@@ -1710,7 +1723,10 @@ void rdp_fbwrite(void)
     int    x,y,w,h,gx,gy,bytes;
 
     w    =rst.frontcbufwid;
-    h    =w*3/4;
+    // its height (lowest scissor line), else 3/4 of the width. Rogue
+    // Squadron's 640x224 intro buffers written back as 480 lines
+    // overwrote the game's data after them and it crashed.
+    h    =rst.frontcbufhig>0?rst.frontcbufhig:w*3/4;
     bytes=rst.frontcbufbytes;
     base =rst.frontcbuf&0x1fffffff;
     if(w<=0 || w>1024 || (bytes!=2 && bytes!=4)) return;
@@ -1809,6 +1825,18 @@ void txt_masksize(Tile *t,dword *cmd)
     {
         cmd[1]=(cmd[1]&~(0x3ff<<2))|((FIELD(cmd[0],2,10)+(1<<t->maskt)-1)<<2);
         t->cmt&=~2;
+    }
+    // the other way: a wrapping tile whose mask is wider than the tile,
+    // read with an up-scaling shift (11..15), samples texels past its size,
+    // up to the mask or one TMEM line. SF Rush draws its HUD digits from a
+    // 16 texel CI8 tile plus the same bytes as CI4 with S doubled and mask
+    // 32; built 16 wide, the CI4 half wrapped inside the first 8 bytes and
+    // drew an X over the digits.
+    if(!(t->cms&2) && t->masks && t->masks<=10 && (1<<t->masks)>ws && t->shifts>=11)
+    {
+        int w=1<<t->masks,line=(t->tmemrl*2)>>t->bpp; // texels per TMEM line
+        if(line>0 && w>line) w=line;
+        if(w>ws) cmd[1]=(cmd[1]&~(0x3ff<<14))|((FIELD(cmd[0],14,10)+w-1)<<14);
     }
 }
 
@@ -2327,6 +2355,7 @@ void drawprims(int p,int i0,int i1)
     }
 
     // draw
+    x_rectclamp(rst.rectmode==1 && (rst.rectclamp&1),rst.rectmode==1 && (rst.rectclamp&2));
     if(COM.dualtxt)
     {
         if(st.dumpgfx) logd("DUALTXT! ");
@@ -2424,6 +2453,7 @@ static void drawprims_n64(int i0,int i1)
     if(st.dumpgfx) logd("\n+FLUSH n64comb cycles:%i tex:%i blend:%04X/%04X rect:%i",
         n64cycles,COM.texenable,rst.s_blend1,rst.s_blend2,rect);
 
+    x_rectclamp(rect && (rst.rectclamp&1),rect && (rst.rectclamp&2));
     x_begin(X_TRIANGLES);
     for(i=i0;i<i1;i++)
     {
@@ -2906,18 +2936,24 @@ void rdp_texrect(TexRect *tr)
     {
         Tile *t=rst.tile+rst.texturetile;
         float span=fabs(tr->s1)*((tr->x0-tr->x1)>(tr->y0-tr->y1)?(tr->x0-tr->x1):(tr->y0-tr->y1))/32.0f;
+        // The wrap is of the coordinate minus the tile's top left, as the RDP
+        // takes it. Wrapped as an absolute value, SF Rush's HUD counter
+        // digits (tile rows 153-169, mask 32, drawn from t=169) moved up 7
+        // rows and showed two half digits.
         if(t->cms<2 && t->masks>0 && (1<<t->masks)>t->xs)
         {
             float period=(float)(32<<t->masks)*(t->cms==1?2:1);
-            float s=tr->s0-period*floorf(tr->s0/period);
-            if(s+span<=period) tr->s0=s;
+            float org=8.0f*t->x0full,s=tr->s0-org;
+            s-=period*floorf(s/period);
+            if(s+span<=period) tr->s0=s+org;
         }
         span=fabs(tr->t1)*((tr->x0-tr->x1)>(tr->y0-tr->y1)?(tr->x0-tr->x1):(tr->y0-tr->y1))/32.0f;
         if(t->cmt<2 && t->maskt>0 && (1<<t->maskt)>t->ys)
         {
             float period=(float)(32<<t->maskt)*(t->cmt==1?2:1);
-            float s=tr->t0-period*floorf(tr->t0/period);
-            if(s+span<=period) tr->t0=s;
+            float org=8.0f*t->y0full,s=tr->t0-org;
+            s-=period*floorf(s/period);
+            if(s+span<=period) tr->t0=s+org;
         }
     }
 
@@ -2941,7 +2977,13 @@ void rdp_texrect(TexRect *tr)
         // squeezed w texels into w-1 pixels: Star Fox 64's title text,
         // 6-row strips, sampled between rows and each strip's last row
         // came out a blend of two (a step under the "Press START" dot).
+        // A fractional lower right edge still covers its pixel: the RDP
+        // draws a pixel that starts before the edge. Mace's backdrop halves
+        // end at x 159.75 and start at 160; drawn to 159.75 at 2x, half a
+        // pixel stayed empty, a dark line down the middle of the screen.
         float ds=tr->s1/32.0f,dt=tr->t1/32.0f;
+        tr->x0=ceilf(tr->x0);
+        tr->y0=ceilf(tr->y0);
         u0=tr->s0-0.5f*ds;
         v0=tr->t0-0.5f*dt;
         u1=tr->s0+(tr->x0-tr->x1-0.5f)*ds;
@@ -2964,6 +3006,18 @@ void rdp_texrect(TexRect *tr)
         t=v1;
         v1=v0;
         v0=t;
+    }
+
+    // sampling only inside its tile (half a texel of slack at each edge):
+    // clamp that axis whatever the tile's wrap (x_rectclamp). Unshifted
+    // tiles only, where u/v are the tile's own texel units.
+    {
+        Tile *t=rst.tile+rst.texturetile;
+        float os=8.0f*t->x0full,ot=8.0f*t->y0full;
+        int   c=0;
+        if(!t->shifts && fminf(u0,u1)>=os-16.0f && fmaxf(u0,u1)<=os+32.0f*t->xs+16.0f) c|=1;
+        if(!t->shiftt && fminf(v0,v1)>=ot-16.0f && fmaxf(v0,v1)<=ot+32.0f*t->ys+16.0f) c|=2;
+        if(c!=rst.rectclamp) { flushprims(); rst.rectclamp=c; }
     }
 
     // generate primitive
@@ -3021,6 +3075,7 @@ void rdp_texquad(const float *x,const float *y,const float *s,const float *t)
 
     viewport(1);
     if(rst.modechange) newmode();
+    if(rst.rectclamp) { flushprims(); rst.rectclamp=0; } // sprites keep the tile's wrap
 
     for(i=0;i<4;i++)
     {
@@ -5546,7 +5601,9 @@ void rdp_present(void)
 {
     if(!rst.presentpending) return;
     rst.presentpending=0;
+    prof_begin(PROF_PRESENT);
     swap();
+    prof_end(PROF_PRESENT);
     if(snaprequest) snap_take(); // the frame just finished (F10/F12)
     // the presented picture now stands for this color buffer; textures
     // the game later reads from it come from the framegrab

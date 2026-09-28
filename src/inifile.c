@@ -311,6 +311,10 @@ void inifile_command(char *cmd)
     {
         cart.keepframe=atoi(param);
     }
+    else IFIS(cmd,"musyxhle")
+    {
+        cart.musyxhle=atoi(param);
+    }
     else IFIS(cmd,"rspgfx")
     {
         cart.rspgfx=atoi(param);

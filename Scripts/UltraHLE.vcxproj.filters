@@ -315,6 +315,9 @@
     <ClCompile Include="..\src\rdp.c">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="..\src\musyx.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="..\src\slist.c">
       <Filter>Source Files</Filter>
     </ClCompile>

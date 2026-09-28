@@ -25,6 +25,13 @@ GLuint xgl_tex_glname(int h)
     return t?t->name:0;
 }
 
+// point sampled (X_NOBILIN): x_rectclamp's sampler keeps the same filter
+int xgl_tex_nearest(int h)
+{
+    xgl_texture *t=get(h);
+    return t?(t->format&X_NOBILIN)!=0:0;
+}
+
 int x_createtexture(int format,int width,int height)
 {
     int h,clamps,clampt,nearest;

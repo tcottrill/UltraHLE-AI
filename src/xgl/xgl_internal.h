@@ -75,6 +75,7 @@ typedef struct
     int    colortext1,text1text2;
     float  env[4];
     int    text1,text2;
+    int    rectclamp;   // x_rectclamp: bit 0 clamp s, bit 1 clamp t
     int    fogtype;
     float  fogmin,fogmax,fogcolor[3];
     // N64 combiner (x_n64combine); n64cycles 0 = the x_combine modes
@@ -102,6 +103,7 @@ void   xgl_shader_destroy(void);
 
 // xgl_tex.c
 GLuint xgl_tex_glname(int handle);
+int    xgl_tex_nearest(int handle);
 
 // xgl_state.c
 void   xgl_state_default(void);

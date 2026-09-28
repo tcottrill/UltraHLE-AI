@@ -132,6 +132,7 @@
     <ClCompile Include="..\src\rdp_soft.c" />
     <ClCompile Include="..\src\rsp.c" />
     <ClCompile Include="..\src\rsp_cxd4.c" />
+    <ClCompile Include="..\src\musyx.c" />
     <ClCompile Include="..\src\slist.c" />
     <ClCompile Include="..\src\sound.c" />
     <ClCompile Include="..\src\sym.c" />

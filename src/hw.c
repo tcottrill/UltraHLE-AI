@@ -184,12 +184,16 @@ void hw_sp_startgfx(void)
     }
 }
 
+// once per game (hw_init): Rush 2049 asks for a yield of each HLE task it
+// can no longer yield, dozens a second
+static int yieldwarned;
+
 void hw_sp_yield(void)
 {
     if(!spgfxexecuting)
     {
         LOGH("\n");
-        warning("hw: spYield with no executing task");
+        if(!yieldwarned++) warning("hw: spYield with no executing task (not shown again this game)");
         // hack
 //        os_event(OS_EVENT_SP);
     }
@@ -244,7 +248,9 @@ void hw_sp_start(void)
         if(sptask.type==2 && slist_hle(&sptask))
         {
             memcpy(&st2.audiotask,&sptask,sizeof(OSTask_t));
+            prof_begin(PROF_AUDIO);
             if(st.soundenable) slist_execute(&st2.audiotask);
+            prof_end(PROF_AUDIO);
             os_event(OS_EVENT_SP);
         }
         else if(sptask.type==4 && cart.iszelda)
@@ -571,6 +577,7 @@ void hw_init(void)
     // init reg data we don't want to be 0 (default init value)
     WSI[1]=NULLFILL;
     WSI[4]=NULLFILL;
+    yieldwarned=0;
 }
 
 void hw_memio(void)

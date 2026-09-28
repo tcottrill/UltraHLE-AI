@@ -314,6 +314,7 @@ EXPORT void    x_n64convert(float k4,float k5);
 
 EXPORT int     x_texture(int text1handle); // single texture
 EXPORT int     x_texture2(int text1handle,int text2handle); // dual texture
+EXPORT int     x_rectclamp(int s,int t);  // clamp the bound textures on these axes (sampler override)
 
 /****************************************************************************
 ** xtext.c

@@ -221,6 +221,37 @@ int x_texture2(int text1handle,int text2handle)
     return 0;
 }
 
+// Texture rectangles that sample only inside their tile: clamp those axes
+// whatever the texture's wrap. At 1x the RDP samples texel centres and a
+// tile-sized wrap never shows; drawn larger, bilinear filtering at the
+// rectangle's edge blended in the tile's opposite row (SF Rush's Midway
+// logo, 8-row strips with an 8-row mask, had a line at every join).
+int x_rectclamp(int s,int t)
+{
+    int c=(s?1:0)|(t?2:0);
+    if(c==xg.rectclamp) return 0;
+    x_flush();
+    xg.rectclamp=c;
+    return 0;
+}
+
+// a sampler for clamp mode c (1 s, 2 t, 3 both) and filter, made once
+static GLuint rectsampler(int c,int nearest)
+{
+    static GLuint smp[4][2];
+    GLuint *s=&smp[c][nearest];
+    if(!*s)
+    {
+        GLenum f=nearest?GL_NEAREST:GL_LINEAR;
+        glGenSamplers(1,s);
+        glSamplerParameteri(*s,GL_TEXTURE_WRAP_S,(c&1)?GL_CLAMP_TO_EDGE:GL_REPEAT);
+        glSamplerParameteri(*s,GL_TEXTURE_WRAP_T,(c&2)?GL_CLAMP_TO_EDGE:GL_REPEAT);
+        glSamplerParameteri(*s,GL_TEXTURE_MIN_FILTER,f);
+        glSamplerParameteri(*s,GL_TEXTURE_MAG_FILTER,f);
+    }
+    return *s;
+}
+
 int x_fog(int type,float min,float max,float r,float g,float b)
 {
     x_flush();
@@ -312,5 +343,7 @@ void xgl_state_apply(void)
     glBindTexture(GL_TEXTURE_2D,xgl_tex_glname(xg.text2));
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D,xgl_tex_glname(xg.text1));
+    glBindSampler(0,xg.rectclamp?rectsampler(xg.rectclamp,xgl_tex_nearest(xg.text1)):0);
+    glBindSampler(1,xg.rectclamp?rectsampler(xg.rectclamp,xgl_tex_nearest(xg.text2)):0);
     xgl_stats.chg_mode++;
 }

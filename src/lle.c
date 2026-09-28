@@ -196,7 +196,18 @@ int lle_framedone(void)
 static void lle_countretrace(void)
 {
     lle.countbase+=lle_countpervi();
-    lle.countref=lle_now();
+    // countperop games: the next frame starts where this one's instructions
+    // ended, not at the retrace, which comes a few bursts after the frame is
+    // done (sync.c). Counting from the retrace made each frame about 6%
+    // long, and Rogue Squadron ran at 56 VI/s with the audio sync holding
+    // it there. More than a frame behind (a load, the debugger): restart.
+    if(cart.countperop>0)
+    {
+        qword frame=lle_countpervi()/cart.countperop;
+        lle.countref+=frame;
+        if(lle_now()-lle.countref>frame) lle.countref=lle_now();
+    }
+    else lle.countref=lle_now();
 }
 
 // ask cpu.c to end the burst after this instruction, so interrupts are
@@ -1260,7 +1271,21 @@ static void lle_visize(void)
     int vstart=(RVI[10]>>16)&0x3ff;
     int vend=RVI[10]&0x3ff;
     int yscale=RVI[13]&0xfff;
-    int h;
+    int h,fields=0;
+
+    // VI_WIDTH twice the width the VI shows (H_VIDEO times X_SCALE): each
+    // field is every other line of the buffer. Rogue Squadron's missions
+    // show a 512x448 buffer as 1024 wide, origin +0 or +1 line; taken as a
+    // 1024 wide screen, its 512 wide buffer looked offscreen (render to
+    // texture) and the screen stayed black.
+    {
+        int hs=(RVI[9]>>16)&0x3ff,he=RVI[9]&0x3ff,xs=RVI[12]&0xfff,shown;
+        if(he>hs && xs)
+        {
+            shown=(he-hs)*xs/1024;
+            if(shown>=160 && w>=shown*2-8 && w<=shown*2+8) { w/=2; fields=1; }
+        }
+    }
 
     if(w<160 || w>1024) return;
     // VI off or not set up yet: no height. A transient or blanking V_START
@@ -1278,6 +1303,7 @@ static void lle_visize(void)
     // stayed 640x240, half the picture shown)
     else if(vend<=vstart || vstart<0x10) h=(int)(((0x1fd-0x23)>>1)*yscale/1024*1.0126582f)&~1;
     else h=(int)(((vend-vstart)>>1)*yscale/1024*1.0126582f)&~1;
+    h*=1+fields; // both fields' lines
     // no height from the VI yet: leave it 0 so the frame's full-screen
     // fillrect sets it (rdp_fillrect). A guessed 240 stuck on All-Star
     // Baseball 2000's credits, drawn once before its 438-line mode is set.
@@ -1334,6 +1360,10 @@ void lle_event(int ev)
         lle.vis++;
         RVI[4]=0;
         lle_raise(MI_VI,0);
+        { // every 2 emulated seconds: where the host's time went (timer.c)
+            static int n;
+            if(++n>=120) { prof_report(n); n=0; }
+        }
         if(lle.vis>=600)
         { // about every 10 seconds: interrupt activity (DP = graphics frames)
             print("lle: 600 VI; SP %i DP %i SI %i AI %i PI %i VI %i timer %i exc %i; MI %02X/%02X Status %08X Cause %08X EPC %08X PC %08X Count %08X Compare %08X\n",

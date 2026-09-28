@@ -255,7 +255,9 @@ void sync_checkretrace(void)
         Timer wait;
         int   left;
         timer_reset(&wait);
+        prof_begin(PROF_WAIT);
         while((left=st2.usleft-timer_us(&wait))>0) Sleep(left>2000?1:0);
+        prof_end(PROF_WAIT);
         us=timer_usreset(&retracetimer);
         if(us>1000000 || us<0) us=0;
         st2.usleft-=us;
@@ -274,8 +276,14 @@ void sync_checkretrace(void)
     {
         static int cnt;
         // HLE waits until the game has taken the last retrace message;
-        // in LLE mode the VI interrupt is delivered regardless
-        if(st.lleos || os_eventqueuefree(OS_EVENT_RETRACE)) cnt++;
+        // in LLE mode the VI interrupt is delivered regardless, except that
+        // countperop games get their whole frame of CPU time first. Behind
+        // the host clock, the VI came early with part of the frame unrun,
+        // and their AI buffers (timed in CPU time) made that much less
+        // audio: Rogue Squadron's sound cut out while the host was idle a
+        // third of the time.
+        if(st.lleos ? (cart.countperop<=0 || lle_framedone())
+                    : os_eventqueuefree(OS_EVENT_RETRACE)) cnt++;
         else
         {
             cnt=0;

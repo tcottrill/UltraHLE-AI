@@ -49,7 +49,8 @@ typedef struct
     int    countperop; // LLE: Count ticks per instruction, 0 = 3/4 (ultra.ini)
     int    pak;        // controller accessory: PAK_MEMORY (0), PAK_RUMBLE, PAK_NONE (ultra.ini pak=)
     int    rspgfx;     // LLE: gfx tasks run on the RSP interpreter, raw RDP (ultra.ini)
-    int    RESERVED[3];
+    int    musyxhle;   // MusyX audio tasks run by musyx.c, not the RSP (ultra.ini)
+    int    RESERVED[2];
 
     // gfx and sound modes
     int    dlist_diddlyvx;

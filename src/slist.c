@@ -2007,19 +2007,23 @@ void slist_zelda(OSTask_t *task)
 #define AUDIO_ZELDA    1 // slist_zelda  (NEAD)
 #define AUDIO_BANJO    2 // slist_banjo  (naudio)
 #define AUDIO_NONE     3 // no handler (MusyX): skip the list, silence
+#define AUDIO_MUSYX1   4 // musyx_v1_task (ultra.ini musyxhle=1)
+#define AUDIO_MUSYX2   5 // musyx_v2_task (ultra.ini musyxhle=1)
 
+void musyx_v1_task(dword data_ptr,dword data_size);
+void musyx_v2_task(dword data_ptr,dword data_size);
 
 
 static int slist_detectucode(OSTask_t *task)
 {
     static dword lastaddr=0xffffffff;
-    static int   lasttype;
+    static int   lasttype,lastmusyx;
     dword d=task->m_ucode_data;
     dword v;
     int   type=AUDIO_UNKNOWN;
     const char *name="unknown";
 
-    if(d==lastaddr) return(lasttype);
+    if(d==lastaddr && cart.musyxhle==lastmusyx) return(lasttype);
 
     if(mem_read32p(d)==1 && mem_read32p(d+0x30)==0xf0000f00)
     {
@@ -2051,7 +2055,9 @@ static int slist_detectucode(OSTask_t *task)
         case 0x1f4c1230: // F-Zero X Expansion
             type=AUDIO_ZELDA; name="NEAD"; break;
         case 0x00010010: // Indiana Jones, Battle for Naboo
-            type=AUDIO_NONE; name="MusyX v2 (unsupported)"; break;
+            if(cart.musyxhle) { type=AUDIO_MUSYX2; name="MusyX v2"; }
+            else { type=AUDIO_NONE; name="MusyX v2 (RSP)"; }
+            break;
         }
         else switch(v)
         {
@@ -2062,19 +2068,23 @@ static int slist_detectucode(OSTask_t *task)
         case 0x1ab0140c: // Conker's Bad Fur Day
             type=AUDIO_BANJO; name="naudio"; break;
         case 0x00000001: // Rogue Squadron, Resident Evil 2
-            type=AUDIO_NONE; name="MusyX v1 (unsupported)"; break;
+            if(cart.musyxhle) { type=AUDIO_MUSYX1; name="MusyX v1"; }
+            else { type=AUDIO_NONE; name="MusyX v1 (RSP)"; }
+            break;
         }
     }
 
     print("slist: audio microcode %s (data %08X, sig %08X)\n",name,d,v);
     lastaddr=d;
     lasttype=type;
+    lastmusyx=cart.musyxhle;
     return(type);
 }
 
-// can slist_execute run this audio task? MusyX can't: its tasks go to the
-// RSP interpreter, and the game's AI buffers are played (slist_nextbuffer
-// plays every buffer the AI takes). The World Is Not Enough.
+// can slist_execute run this audio task? MusyX without musyxhle can't: its
+// tasks go to the RSP interpreter, and the game's AI buffers are played
+// (slist_nextbuffer plays every buffer the AI takes). The World Is Not
+// Enough.
 int slist_hle(OSTask_t *task)
 {
     return(slist_detectucode(task)!=AUDIO_NONE);
@@ -2086,6 +2096,18 @@ void slist_execute(OSTask_t *task)
     static int initdone;
     static int firsttime=1;
     int starttime;
+
+    // MusyX mixes into RDRAM and the game queues that on the AI, which
+    // plays it: no soundlists flag (in LLE it stops AI buffers playing)
+    audiotype=slist_detectucode(task);
+    if(audiotype==AUDIO_MUSYX1 || audiotype==AUDIO_MUSYX2)
+    {
+        starttime=timer_us(&st2.timer);
+        if(audiotype==AUDIO_MUSYX1) musyx_v1_task(task->m_data_ptr,task->data_size);
+        else                        musyx_v2_task(task->m_data_ptr,task->data_size);
+        st.us_audio+=timer_us(&st2.timer)-starttime;
+        return;
+    }
 
     st2.audiorequest=1;
     st2.soundlists=1;
