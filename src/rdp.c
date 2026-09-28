@@ -84,6 +84,10 @@ typedef struct
 #define RDP_BUF_Z   1
 #define RDP_BUF_C   2
 
+// FBO height for a few-row offscreen target in a screen-width buffer
+// (rdp_cmd SETSCISSOR: Paper Mario's sprite shading palettes)
+#define RTT_SMALLH  16
+
 // bpps
 #define RDP_BPP_4   0
 #define RDP_BPP_8   1
@@ -219,13 +223,14 @@ typedef struct
     dword     tmemy0 [4096/8*2]; // where textures loaded to tmem
     // render to texture: an offscreen color buffer drawn into an OpenGL FBO
     // (x_rtt_*) and written back to RDRAM when the game moves on
-    int       rtt_on,rtt_w,rtt_bpp,rtt_maxy;
+    int       rtt_on,rtt_w,rtt_h,rtt_bpp,rtt_maxy;
     dword     rtt_addr;
     int       rtt_saved[4]; // init.gfxwid/gfxhig/viewportwid/viewporthig
     float     gamevp[4];    // the display list's viewport (N64 pixels)
     int       gamevpset;
     int       tmemlen [4096/8*2]; // bytes of the load starting here (0: none)
     int       tmemline[4096/8*2]; // its TMEM line (LOADTILE), 0 for LOADBLOCK
+    byte      tmemtlut[4096/8];   // slot holds a TLUT entry (LOADTLUT)
     int       txtload[MAXLOAD];
     Texture   txt[MAXTXT]; // 0 not used
     Tile      tile[8];
@@ -303,6 +308,12 @@ typedef struct
     int       pendingcbufbytes;
     int       pendingcbufhig;
     int       pendingage;        // retraces the frame has waited
+    // what the VI has shown (rdp_viorigin): while origins match drawn
+    // frames, only the VI presents (vi_presents)
+    dword     vishown[4];        // color buffers the VI showed (ring)
+    int       vishowni;
+    int       retraces;          // rdp_retrace calls
+    int       lastvipresent;     // retraces at the last matched origin
 
     // viewport
     int       view_x0;
@@ -616,6 +627,40 @@ static int cbufsource(dword addr)
         // left them visible for half a second.
         if(rst.myframe-rst.lastcbufframe[j]>3) continue;
         if(cbuf_contains(rst.lastcbufs[j],rst.lastcbufwid[j],rst.lastcbufbytes[j],rst.lastcbufhig[j],addr)) return(2);
+    }
+    return(0);
+}
+
+// The VI's origins have matched drawn frames within the last second: the
+// game shows its frames through the VI, and only rdp_viorigin presents
+static int vi_presents(void)
+{
+    return(rst.lastvipresent>0 && rst.retraces-rst.lastvipresent<60);
+}
+
+// Has the VI shown the color buffer at addr (its origin can skip a few
+// lines into the buffer)?
+static int vi_hasshown(dword addr)
+{
+    int j;
+    addr&=0x1fffffff;
+    for(j=0;j<4;j++)
+        if(rst.vishown[j] && rst.vishown[j]-addr<0x2000) return(1);
+    return(0);
+}
+
+// Is addr a screen's color buffer: shown, waiting to be shown, or drawn in
+// recently with a scissor taller than a few rows? Not the current ring
+// entry: SETCIMG gives it the last buffer's scissor height.
+static int cbuf_isscreen(dword addr)
+{
+    int j;
+    addr&=0x1fffffff;
+    if(addr==(rst.frontcbuf&0x1fffffff) || addr==(rst.pendingcbuf&0x1fffffff)) return(1);
+    for(j=0;j<8;j++)
+    {
+        if(j==rst.lastcbufi || rst.myframe-rst.lastcbufframe[j]>3) continue;
+        if((rst.lastcbufs[j]&0x1fffffff)==addr && rst.lastcbufhig[j]>RTT_SMALLH) return(1);
     }
     return(0);
 }
@@ -1153,11 +1198,61 @@ int txt_rl(Tile *t)
     return(rl);
 }
 
+static int txt_istlut(Tile *t)
+{
+    return(t->bpp==2 && t->tmembase>=2048 && t->tmembase<4096 &&
+           rst.tmemtlut[(t->tmembase>>3)&511]);
+}
+
+// the TLUT entries a tile reads: one per 8 bytes of its rows
+static int txt_tlutspan(Tile *t)
+{
+    int rl=t->tmemrl>0?t->tmemrl:t->xs*2;
+    int n=((t->ys-1)*rl+t->xs*2+7)/8;
+    return(n<1?1:n>256?256:n);
+}
+
+// texels read from TMEM holding TLUT entries: each entry fills its 8-byte
+// slot (the RDP writes it four times), so every 16-bit texel is an entry
+static void txt_fromtlut(byte *dst,Tile *t)
+{
+    int x,y,a,rl=t->tmemrl>0?t->tmemrl:t->xs*2;
+    word c;
+    for(y=0;y<t->ys;y++)
+        for(x=0;x<t->xs;x++,dst+=4)
+        {
+            c=rst.palette[((t->tmembase+y*rl+x*2-2048)>>3)&255];
+            if(t->fmt==3)
+            {   // IA 8-8
+                dst[0]=dst[1]=dst[2]=(byte)(c>>8);
+                dst[3]=(byte)c;
+            }
+            else
+            {   // RGBA 5-5-5-1
+                a=FIELD(c,11,5); dst[0]=8*a+(a>>2);
+                a=FIELD(c, 6,5); dst[1]=8*a+(a>>2);
+                a=FIELD(c, 1,5); dst[2]=8*a+(a>>2);
+                dst[3]=(c&1)?255:0;
+            }
+        }
+}
+
 dword txt_calccrc(Tile *t)
 {
     int    size,rl;
     dword  crc,madd,addr;
     int    realbpp=4<<t->bpp;
+
+    // 16-bit texels in TMEM a LOADTLUT filled: the palette entries they
+    // read (txt_fromtlut) are the texture
+    if(txt_istlut(t))
+    {
+        int i,n=txt_tlutspan(t),k=(t->tmembase-2048)>>3;
+        t->fromfb=3;
+        for(i=0,crc=0x7e000000;i<n;i++) crc=crc*33+rst.palette[(k+i)&255];
+        if(st.dumpgfx) logd("\n+tile calccrc tlut %i entries at %i -> %08X",n,k,crc);
+        return(crc);
+    }
 
     // textures read from a color buffer: the last presented frame comes from
     // the framegrab (a new key each frame, so it is reloaded when the frame
@@ -1903,6 +1998,11 @@ void txt_loaddata(Texture *txt,Tile *t)
     {
         logd(" CBUFSOURCE ");
         txt_fromcbuf(s,t);
+    }
+    else if(t->fromfb==3)
+    {
+        logd(" TLUT ");
+        txt_fromtlut(s,t);
     }
     else
     {
@@ -5707,16 +5807,16 @@ static int rtt_offscreen(void)
     return((fmt==0 && (bpp==2 || bpp==3)) || (bpp==1 && (fmt==2 || fmt==4)));
 }
 
-static void rtt_begin(void)
+static void rtt_begin(int rtth)
 {
     int    w=rst.bufwid[RDP_BUF_C],bpp=rst.bufbpp[RDP_BUF_C],x,y;
     dword  addr=rst.bufbase[RDP_BUF_C]&0x1fffffff;
     byte  *img,*d;
 
     flushprims();
-    img=malloc(w*RTT_H*4);
+    img=malloc(w*rtth*4);
     if(!img) return;
-    for(y=0,d=img;y<RTT_H;y++)
+    for(y=0,d=img;y<rtth;y++)
         for(x=0;x<w;x++,d+=4)
         {
             dword a=addr+(dword)(y*w+x)*(bpp==3?4:bpp==2?2:1),c;
@@ -5740,12 +5840,13 @@ static void rtt_begin(void)
                 d[3]=(c&1)?255:0;
             }
         }
-    if(!x_rtt_begin(w,RTT_H,img)) { free(img); return; }
+    if(!x_rtt_begin(w,rtth,img)) { free(img); return; }
     free(img);
 
     rst.rtt_on=1;
     rst.rtt_addr=addr;
     rst.rtt_w=w;
+    rst.rtt_h=rtth;
     rst.rtt_bpp=bpp;
     rst.rtt_maxy=0;
     rst.rtt_saved[0]=init.gfxwid;
@@ -5753,11 +5854,11 @@ static void rtt_begin(void)
     rst.rtt_saved[2]=init.viewportwid;
     rst.rtt_saved[3]=init.viewporthig;
     init.gfxwid=init.viewportwid=w;   // N64 pixels map 1:1 onto the FBO
-    init.gfxhig=init.viewporthig=RTT_H;
+    init.gfxhig=init.viewporthig=rtth;
     rst.rectmode=-1;
-    rdp_viewport(w*0.5f,RTT_H*0.5f,w*0.5f,RTT_H*0.5f);
+    rdp_viewport(w*0.5f,rtth*0.5f,w*0.5f,rtth*0.5f);
     x_scissor(0,0,0,0,0);
-    logd("\n+rtt begin %08X %ix%i bpp %i",addr,w,RTT_H,bpp);
+    logd("\n+rtt begin %08X %ix%i bpp %i",addr,w,rtth,bpp);
 }
 
 static void rtt_end(void)
@@ -5768,7 +5869,7 @@ static void rtt_end(void)
     if(!rst.rtt_on) return;
     flushprims();
     h=rst.rtt_maxy>0?rst.rtt_maxy:w*3/4;
-    if(h>RTT_H) h=RTT_H;
+    if(h>rst.rtt_h) h=rst.rtt_h;
     img=malloc(w*h*4);
     cover=malloc(w*h);
     if(img && cover)
@@ -5831,6 +5932,7 @@ static void tmem_loaded(int i,int len,int line)
     rst.tmemlen [i]=len>0?len:8;
     rst.tmemline[i]=line;
     for(j=i+1;j<i+len/8 && j<512;j++) rst.tmemlen[j]=0;
+    for(j=i;j<i+(len>8?len:8)/8 && j<512;j++) rst.tmemtlut[j]=0;
 }
 
 int rdp_cmd(dword *cmd)
@@ -5896,15 +5998,21 @@ int rdp_cmd(dword *cmd)
         // the new frame would draw over it and the later present would clear
         // it away (Mario 64's triple buffering: black and half-drawn frames).
         // Not for the z-buffer clear, which renders into the z-buffer.
+        // While the VI shows the game's frames, only a buffer it has shown
+        // starts the next frame: Paper Mario draws its background as a task
+        // of its own, then renders sprite palettes into another buffer in
+        // the scene's task, and presenting there showed the background alone
+        // and drew the scene over a cleared picture.
         if(rst.presentpending && address(cmd[1])!=rst.pendingcbuf &&
-           address(cmd[1])!=rst.bufbase[RDP_BUF_Z])
+           address(cmd[1])!=rst.bufbase[RDP_BUF_Z] &&
+           (!vi_presents() || vi_hasshown(address(cmd[1]))))
         {
             flushprims();
             rdp_present();
         }
         if(rst.rtt_on && (address(cmd[1])&0x1fffffff)!=rst.rtt_addr) rtt_end();
         setbuffer(RDP_BUF_C,cmd[0],cmd[1]);
-        if(!rst.rtt_on && rtt_offscreen()) rtt_begin();
+        if(!rst.rtt_on && rtt_offscreen()) rtt_begin(RTT_H);
         // HLE: the screen size otherwise comes only from a full screen
         // fillrect (rdp_fillrect); Pokemon Stadium's 640x480 screens clear
         // with a texrect and were drawn at 2x (only their top left quarter
@@ -6272,6 +6380,18 @@ int rdp_cmd(dword *cmd)
             // loads palette 0 (text colors) and 1 (mask) in turn: palette 0
             // kept stale entries and the text background came out opaque
             if(pal>=0 && pal<16) txt_loadtlut(pal,siz,base);
+            // one entry per 8-byte TMEM slot, as tiles there read it
+            // (txt_fromtlut): Paper Mario's sprite shading samples palette 0
+            // as a 64x1 RGBA16 tile, four texels per entry
+            {
+                int i,s0=(rst.tile[ti].tmembase>>3)&511;
+                for(i=0;i<siz && s0+i<512;i++)
+                {
+                    rst.tmemtlut[s0+i]=1;
+                    rst.tmemsrc [s0+i]=base+2*i;
+                    rst.tmemlen [s0+i]=0;
+                }
+            }
         }
         break;
     case 0xef: // RDP_RDPSETOTHERMODE
@@ -6287,6 +6407,19 @@ int rdp_cmd(dword *cmd)
     case 0xed: // RDP_SETSCISSOR: 10.2 screen coordinates, lower right exclusive
         {
             float xs=320,ys=240;
+            // a few rows of a screen-width color image that no frame has
+            // been drawn into: an offscreen target after all (rtt_offscreen
+            // takes 320/640 for the screen). Paper Mario renders each lit
+            // sprite's shading palette into a 16x1 corner of a 320 wide
+            // buffer and loads it as a TLUT: drawn on the screen instead,
+            // RDRAM kept zeros and the sprites came out black.
+            if(!rst.rtt_on && (int)FIELD(cmd[1],0,12)<=RTT_SMALLH*4 &&
+               (FIELD(cmd[1],12,12)/4)*((FIELD(cmd[1],0,12)+3)/4)<=256 &&
+               rst.bufbase[RDP_BUF_C]!=rst.bufbase[RDP_BUF_Z] &&
+               !cbuf_isscreen(rst.bufbase[RDP_BUF_C]) &&
+               (rst.bufwid[RDP_BUF_C]==320 || rst.bufwid[RDP_BUF_C]==640) &&
+               rst.buffmt[RDP_BUF_C]==0 && rst.bufbpp[RDP_BUF_C]==2)
+                rtt_begin(RTT_SMALLH);
             if(init.viewportwid)
             {
                 xs=init.viewportwid;
@@ -6570,7 +6703,18 @@ void rdp_viorigin(dword origin)
 {    // the origin can skip a few lines into the buffer
     if(rst.presentpending &&
        (origin&0x1fffffff)-(rst.pendingcbuf&0x1fffffff)<0x2000)
+    {
+        int j;
+        for(j=0;j<4;j++)
+            if(rst.vishown[j]==(origin&0x1fffffff)) break;
+        if(j==4)
+        {
+            rst.vishowni=(rst.vishowni+1)&3;
+            rst.vishown[rst.vishowni]=origin&0x1fffffff;
+        }
+        rst.lastvipresent=rst.retraces>0?rst.retraces:1;
         rdp_present();
+    }
 }
 
 /****************************************************************************
@@ -6824,9 +6968,14 @@ void rdp_showvi(dword origin,int width,int height,int bpp)
     rdp_present();
 }
 
-// per retrace: a frame no VI origin ever matched is shown anyway
+// per retrace: a frame no VI origin ever matched is shown anyway, unless
+// origins are matching (vi_presents): then the game is still drawing it
+// (Paper Mario's background task waits for the scene's, which the CPU may
+// take several retraces to build)
 void rdp_retrace(void)
 {
+    rst.retraces++;
+    if(vi_presents()) { rst.pendingage=0; return; }
     if(rst.presentpending && ++rst.pendingage>=3) rdp_present();
 }
 
