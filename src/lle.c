@@ -250,11 +250,29 @@ static int mibit(dword bit)
     return(0);
 }
 
+// an HLE task finished (lle_event): its SP interrupt is on the way
+static int lle_sptaskdone;
+
+// the RSP still counts as running (hw.c keeps SP_STATUS halt clear)
+int lle_sptaskpending(void)
+{
+    return(lle_sptaskdone);
+}
+
 // an MI interrupt has just become pending: device status that shows it
-// (PI_STATUS: DMA done, interrupt set)
+// (PI_STATUS: DMA done, interrupt set). An HLE task's end (halt, broke,
+// signal 2) shows in SP_STATUS with its interrupt, as the microcode's BREAK
+// sets both at once (ares RSP::BREAK). Shown earlier, Ogre Battle 64 started
+// its next task in the gap (it polls halt), both ends made one interrupt,
+// and its graphics thread waited forever for its task-done message: black.
 static void lle_irqfired(dword bit)
 {
     if(bit==MI_PI) RPI[4]=(RPI[4]&~1u)|8u;
+    if(bit==MI_SP && lle_sptaskdone)
+    {
+        lle_sptaskdone=0;
+        hw_sp_taskdone();
+    }
 }
 
 static void lle_raise(dword bit,int delay)
@@ -1333,7 +1351,7 @@ void lle_event(int ev)
     switch(ev)
     {
     case OS_EVENT_SP:
-        hw_sp_taskdone();
+        lle_sptaskdone=1; // SP_STATUS shows the end with the interrupt
         lle_raise(MI_SP,RSP_TASK_DELAY);
         break;
     case OS_EVENT_DP:

@@ -45,6 +45,8 @@ typedef struct
     int      env_rtadd;
     int      env_lttar; // target volume
     int      env_rttar;
+    int      env_dry;   // SETVOL aux dry level (ABI1), kept like Mupen64Plus'
+    int      env_dryset;
     // output
     int      lastcodebook;
     int      lastcodebooklen;
@@ -518,6 +520,76 @@ void adpcm(dword m_state,int src,int dst,int cnt,int flags)
 
 
 
+// Mupen64Plus alist_resample (audio.c RESAMPLE_LUT): the microcode's 4-tap
+// resampler, 64 filter phases. Used for NEAD (ABI2): the linear one below
+// writes 16 samples past its count and keeps 8 samples of history; its
+// output differed from Star Fox 64's microcode's by up to 52743.
+static const short resample_lutab[64*4]={
+    0x0c39,0x66ad,0x0d46,(short)0xffdf, 0x0b39,0x6696,0x0e5f,(short)0xffd8,
+    0x0a44,0x6669,0x0f83,(short)0xffd0, 0x095a,0x6626,0x10b4,(short)0xffc8,
+    0x087d,0x65cd,0x11f0,(short)0xffbf, 0x07ab,0x655e,0x1338,(short)0xffb6,
+    0x06e4,0x64d9,0x148c,(short)0xffac, 0x0628,0x643f,0x15eb,(short)0xffa1,
+    0x0577,0x638f,0x1756,(short)0xff96, 0x04d1,0x62cb,0x18cb,(short)0xff8a,
+    0x0435,0x61f3,0x1a4c,(short)0xff7e, 0x03a4,0x6106,0x1bd7,(short)0xff71,
+    0x031c,0x6007,0x1d6c,(short)0xff64, 0x029f,0x5ef5,0x1f0b,(short)0xff56,
+    0x022a,0x5dd0,0x20b3,(short)0xff48, 0x01be,0x5c9a,0x2264,(short)0xff3a,
+    0x015b,0x5b53,0x241e,(short)0xff2c, 0x0101,0x59fc,0x25e0,(short)0xff1e,
+    0x00ae,0x5896,0x27a9,(short)0xff10, 0x0063,0x5720,0x297a,(short)0xff02,
+    0x001f,0x559d,0x2b50,(short)0xfef4, (short)0xffe2,0x540d,0x2d2c,(short)0xfee8,
+    (short)0xffac,0x5270,0x2f0d,(short)0xfedb, (short)0xff7c,0x50c7,0x30f3,(short)0xfed0,
+    (short)0xff53,0x4f14,0x32dc,(short)0xfec6, (short)0xff2e,0x4d57,0x34c8,(short)0xfebd,
+    (short)0xff0f,0x4b91,0x36b6,(short)0xfeb6, (short)0xfef5,0x49c2,0x38a5,(short)0xfeb0,
+    (short)0xfedf,0x47ed,0x3a95,(short)0xfeac, (short)0xfece,0x4611,0x3c85,(short)0xfeab,
+    (short)0xfec0,0x4430,0x3e74,(short)0xfeac, (short)0xfeb6,0x424a,0x4060,(short)0xfeaf,
+    (short)0xfeaf,0x4060,0x424a,(short)0xfeb6, (short)0xfeac,0x3e74,0x4430,(short)0xfec0,
+    (short)0xfeab,0x3c85,0x4611,(short)0xfece, (short)0xfeac,0x3a95,0x47ed,(short)0xfedf,
+    (short)0xfeb0,0x38a5,0x49c2,(short)0xfef5, (short)0xfeb6,0x36b6,0x4b91,(short)0xff0f,
+    (short)0xfebd,0x34c8,0x4d57,(short)0xff2e, (short)0xfec6,0x32dc,0x4f14,(short)0xff53,
+    (short)0xfed0,0x30f3,0x50c7,(short)0xff7c, (short)0xfedb,0x2f0d,0x5270,(short)0xffac,
+    (short)0xfee8,0x2d2c,0x540d,(short)0xffe2, (short)0xfef4,0x2b50,0x559d,0x001f,
+    (short)0xff02,0x297a,0x5720,0x0063, (short)0xff10,0x27a9,0x5896,0x00ae,
+    (short)0xff1e,0x25e0,0x59fc,0x0101, (short)0xff2c,0x241e,0x5b53,0x015b,
+    (short)0xff3a,0x2264,0x5c9a,0x01be, (short)0xff48,0x20b3,0x5dd0,0x022a,
+    (short)0xff56,0x1f0b,0x5ef5,0x029f, (short)0xff64,0x1d6c,0x6007,0x031c,
+    (short)0xff71,0x1bd7,0x6106,0x03a4, (short)0xff7e,0x1a4c,0x61f3,0x0435,
+    (short)0xff8a,0x18cb,0x62cb,0x04d1, (short)0xff96,0x1756,0x638f,0x0577,
+    (short)0xffa1,0x15eb,0x643f,0x0628, (short)0xffac,0x148c,0x64d9,0x06e4,
+    (short)0xffb6,0x1338,0x655e,0x07ab, (short)0xffbf,0x11f0,0x65cd,0x087d,
+    (short)0xffc8,0x10b4,0x6626,0x095a, (short)0xffd0,0x0f83,0x6669,0x0a44,
+    (short)0xffd8,0x0e5f,0x6696,0x0b39, (short)0xffdf,0x0d46,0x66ad,0x0c39
+};
+
+// src, dst, cnt in bytes; pitch Q16.16 (the command's pitch << 1); the state
+// (at m_state) is the 4 samples before the input and the pitch fraction
+void resample_lut(dword m_state,int src,int dst,int cnt,int init,dword pitch)
+{
+    int   ipos=(src>>1)-4,opos=dst>>1,k;
+    dword accu;
+    if(init)
+    {
+        for(k=0;k<4;k++) sst.mem[ipos+k]=0;
+        accu=0;
+    }
+    else
+    {
+        for(k=0;k<4;k++) sst.mem[ipos+k]=(short)mem_read16(m_state+k*2);
+        accu=mem_read16(m_state+8);
+    }
+    for(cnt>>=1;cnt>0;cnt--)
+    {
+        const short *lut=resample_lutab+((accu&0xfc00)>>8);
+        long v=(long)sst.mem[ipos]*lut[0]+(long)sst.mem[ipos+1]*lut[1]+
+               (long)sst.mem[ipos+2]*lut[2]+(long)sst.mem[ipos+3]*lut[3];
+        v>>=15;
+        sst.mem[opos++]=(short)(v<-32768?-32768:v>32767?32767:v);
+        accu+=pitch;
+        ipos+=accu>>16;
+        accu&=0xffff;
+    }
+    for(k=0;k<4;k++) mem_write16(m_state+k*2,(word)sst.mem[ipos+k]);
+    mem_write16(m_state+8,(word)accu);
+}
+
 void resample(dword m_state,int src,int dst,int cnt,int flags,int speed)
 {
     int subpos,a,b,r;
@@ -738,128 +810,60 @@ void filter(int dst,int cnt,int m_coef,int m_state,int flags)
     savesamplestate(2048,m_state,flags&1);
 }
 
-void envmix_zelda(int src,int dst1,int dst2,int eff1,int eff2,int cnt)
+// NEAD envelopes (Mupen64Plus alist_nead ENVSETUP1/2, ENVMIXER and
+// alist_envmix_nead): dry left/right and wet levels, stepped every 8
+// samples and kept between commands; sums saturate. The envmix_zelda these
+// replaced wrapped on overflow, kept no wet ramp and ignored the sign and
+// swap bits: Star Fox's mix differed from its microcode's and crackled.
+static struct { word val[3],step[3]; } nenv;
+static int neadmk; // Mario Kart's NEAD: ENVSETUP1_MK, ENVMIXER_MK
+static int neadsf; // Star Fox's and Mario Kart's NEAD: INTERLEAVE_MK
+
+static void envset1_nead(dword w1,dword w2)
 {
-    int i,j,jn,lx,rx;
-    int lteff,rteff;
-    int ltmul,ltadd;
-    int rtmul,rtadd;
-    int lt,rt;
-    cnt>>=1;
-    src>>=1;
-    dst1>>=1;
-    dst2>>=1;
-    eff1>>=1;
-    eff2>>=1;
+    nenv.val[2] =(word)((w1>>8)&0xff00);
+    nenv.step[2]=neadmk?0:(word)w1;
+    nenv.step[0]=(word)(w2>>16);
+    nenv.step[1]=(word)w2;
+}
 
-    lteff=sst.env_lteff;
-    rteff=sst.env_rteff;
-    ltmul=sst.env_ltvol;
-    rtmul=sst.env_rtvol;
-    ltadd=sst.env_ltadd;
-    rtadd=sst.env_rtadd;
+static void envset2_nead(dword w2)
+{
+    nenv.val[0]=(word)(w2>>16);
+    nenv.val[1]=(word)w2;
+}
 
-    if(!lteff && !rteff && !ltmul && !ltadd && !rtmul && !rtmul)
+static short sat16(long v) { return((short)(v<-32768?-32768:v>32767?32767:v)); }
+
+static void envmix_nead(dword w1,dword w2)
+{
+    int   in=((w1>>12)&0xff0)>>1,count=(w1>>8)&0xff;
+    int   dl=((w2>>20)&0xff0)>>1,dr=((w2>>12)&0xff0)>>1;
+    int   wl=((w2>> 4)&0xff0)>>1,wr=((w2<< 4)&0xff0)>>1;
+    short x0=(short)(0-(short)((w1&2)>>1)),x1=(short)(0-(short)(w1&1));
+    short x2=neadmk?0:(short)(0-(short)((w1&8)>>1));
+    short x3=neadmk?0:(short)(0-(short)((w1&4)>>1));
+    int   i,t;
+    if(!neadmk && ((w1>>4)&1)) { t=wl; wl=wr; wr=t; }
+    count=(count+7)&~7;
+    for(;count>0;count-=8)
     {
-        // no need to mix, volumes zero
-        return;
-    }
-
-    if(st.dumpsnd) loga("\n+envelope_z eff(%04X,%04X) left(%04X,%6i) right(%04X,%6i)",
-        lteff,rteff,ltmul,ltadd,rtmul,rtadd);
-
-    if(!lteff && !rteff && !ltadd && !rtadd)
-    {
-        // no effect mix
-        for(j=0;j<cnt;j++)
+        for(i=0;i<8;i++)
         {
-            lt=rt=sst.mem[src+j];
-            lt=(lt*ltmul)>>16;
-            rt=(rt*rtmul)>>16;
-            lx=lt+sst.mem[dst1+j];
-            rx=rt+sst.mem[dst2+j];
-            /*
-            if(lx<-32767) lx=-32767;
-            if(lx> 32767) lx= 32767;
-            if(rx<-32767) rx=-32767;
-            if(rx> 32767) rx= 32767;
-            */
-            sst.mem[dst1+j]=lx;
-            sst.mem[dst2+j]=rx;
+            int   s=sst.mem[in+i];
+            short l =(short)((dword)(s*(int)nenv.val[0])>>16)^x0;
+            short r =(short)((dword)(s*(int)nenv.val[1])>>16)^x1;
+            short l2=(short)((dword)(l*(int)nenv.val[2])>>16)^x2;
+            short r2=(short)((dword)(r*(int)nenv.val[2])>>16)^x3;
+            sst.mem[dl+i]=sat16(sst.mem[dl+i]+l);
+            sst.mem[dr+i]=sat16(sst.mem[dr+i]+r);
+            sst.mem[wl+i]=sat16(sst.mem[wl+i]+l2);
+            sst.mem[wr+i]=sat16(sst.mem[wr+i]+r2);
         }
-    }
-    else if(!ltadd && !rtadd)
-    {
-        // no volume change
-        for(j=0;j<cnt;j++)
-        {
-            lt=rt=sst.mem[src+j];
-            lt=(lt*ltmul)>>16;
-            rt=(rt*rtmul)>>16;
-            lx=lt+sst.mem[dst1+j];
-            rx=rt+sst.mem[dst2+j];
-            /*
-            if(lx<-32767) lx=-32767;
-            if(lx> 32767) lx= 32767;
-            if(rx<-32767) rx=-32767;
-            if(rx> 32767) rx= 32767;
-            */
-            sst.mem[dst1+j]=lx;
-            sst.mem[dst2+j]=rx;
-            lt=(lt*lteff)>>16;
-            rt=(rt*rteff)>>16;
-            sst.mem[eff1+j]+=lt;
-            sst.mem[eff2+j]+=rt;
-        }
-    }
-    else
-    {
-        for(i=0;i<cnt;i+=8)
-        {
-            jn=i+8;
-            for(j=i;j<jn;j++)
-            {
-                lt=rt=sst.mem[src+j];
-                lt=(lt*ltmul)>>16;
-                rt=(rt*rtmul)>>16;
-                lx=lt+sst.mem[dst1+j];
-                rx=rt+sst.mem[dst2+j];
-                /*
-                if(lx<-32767) lx=-32767;
-                if(lx> 32767) lx= 32767;
-                if(rx<-32767) rx=-32767;
-                if(rx> 32767) rx= 32767;
-                */
-                sst.mem[dst1+j]=lx;
-                sst.mem[dst2+j]=rx;
-                lt=(lt*lteff)>>16;
-                rt=(rt*rteff)>>16;
-                sst.mem[eff1+j]+=lt;
-                sst.mem[eff2+j]+=rt;
-            }
-            ltmul+=ltadd;
-            rtmul+=rtadd;
-            if(ltmul>65535)
-            {
-                ltmul=65535;
-                ltadd=0;
-            }
-            else if(ltmul<0)
-            {
-                ltmul=0;
-                ltadd=0;
-            }
-            if(rtmul>65535)
-            {
-                rtmul=65535;
-                rtadd=0;
-            }
-            else if(rtmul<0)
-            {
-                rtmul=0;
-                rtadd=0;
-            }
-        }
+        nenv.val[0]+=nenv.step[0];
+        nenv.val[1]+=nenv.step[1];
+        nenv.val[2]+=nenv.step[2];
+        in+=8; dl+=8; dr+=8; wl+=8; wr+=8;
     }
 }
 
@@ -890,6 +894,8 @@ void movehalve(int out,int in,int count)
     }
 }
 
+static short clamp16(long v) { return((short)(v<-32768?-32768:v>32767?32767:v)); }
+
 void envmix_mario(int src,int dst1,int dst2,int eff1,int eff2,int cnt)
 {
     int i,j,jn;
@@ -897,6 +903,11 @@ void envmix_mario(int src,int dst1,int dst2,int eff1,int eff2,int cnt)
     int ltmul,ltadd,lttar;
     int rtmul,rtadd,rttar;
     int lt,rt;
+    // dry out = in*vol*dry, wet out = in*vol*wet (Mupen64Plus
+    // alist_envmix_exp). Dry was taken as full: Star Fox's voices came out
+    // too loud and clipped once the adds saturated.
+    int dry=sst.env_dryset?sst.env_dry<<1:-1;
+#define DRY(x) (dry<0?(x):((x)*dry)>>16)
     cnt>>=1;
     src>>=1;
     dst1>>=1;
@@ -941,8 +952,8 @@ void envmix_mario(int src,int dst1,int dst2,int eff1,int eff2,int cnt)
             lt=rt=sst.mem[src+j];
             lt=(lt*ltmul)>>16;
             rt=(rt*rtmul)>>16;
-            sst.mem[dst1+j]+=lt;
-            sst.mem[dst2+j]+=rt;
+            sst.mem[dst1+j]=clamp16(sst.mem[dst1+j]+DRY(lt));
+            sst.mem[dst2+j]=clamp16(sst.mem[dst2+j]+DRY(rt));
         }
     }
     else if(!ltadd && !rtadd)
@@ -953,12 +964,12 @@ void envmix_mario(int src,int dst1,int dst2,int eff1,int eff2,int cnt)
             lt=rt=sst.mem[src+j];
             lt=(lt*ltmul)>>16;
             rt=(rt*rtmul)>>16;
-            sst.mem[dst1+j]+=lt;
-            sst.mem[dst2+j]+=rt;
+            sst.mem[dst1+j]=clamp16(sst.mem[dst1+j]+DRY(lt));
+            sst.mem[dst2+j]=clamp16(sst.mem[dst2+j]+DRY(rt));
             lt=(lt*lteff)>>16;
             rt=(rt*rteff)>>16;
-            sst.mem[eff1+j]+=lt;
-            sst.mem[eff2+j]+=rt;
+            sst.mem[eff1+j]=clamp16(sst.mem[eff1+j]+lt);
+            sst.mem[eff2+j]=clamp16(sst.mem[eff2+j]+rt);
         }
     }
     else
@@ -972,12 +983,12 @@ void envmix_mario(int src,int dst1,int dst2,int eff1,int eff2,int cnt)
                 lt=rt=sst.mem[src+j];
                 lt=(lt*ltmul)>>16;
                 rt=(rt*rtmul)>>16;
-                sst.mem[dst1+j]+=lt;
-                sst.mem[dst2+j]+=rt;
+                sst.mem[dst1+j]=clamp16(sst.mem[dst1+j]+DRY(lt));
+                sst.mem[dst2+j]=clamp16(sst.mem[dst2+j]+DRY(rt));
                 lt=(lt*lteff)>>16;
                 rt=(rt*rteff)>>16;
-                sst.mem[eff1+j]+=lt;
-                sst.mem[eff2+j]+=rt;
+                sst.mem[eff1+j]=clamp16(sst.mem[eff1+j]+lt);
+                sst.mem[eff2+j]=clamp16(sst.mem[eff2+j]+rt);
             }
             ltmul+=ltadd;
             if(ltadd>0)
@@ -1124,6 +1135,7 @@ void envmix_loadstate(dword addr)
     sst.env_rtadd=mem_read32p(addr+20);
     sst.env_lttar=mem_read32p(addr+24);
     sst.env_rttar=mem_read32p(addr+28);
+    if(sst.env_dryset) sst.env_dry=(short)mem_read32p(addr+32);
 }
 
 void envmix_savestate(dword addr)
@@ -1136,6 +1148,7 @@ void envmix_savestate(dword addr)
     mem_write32(addr+20,sst.env_rtadd);
     mem_write32(addr+24,sst.env_lttar);
     mem_write32(addr+28,sst.env_rttar);
+    mem_write32(addr+32,sst.env_dry); // inside the ucode's 80-byte state
 }
 
 void envmix_clearstate(void)
@@ -1206,8 +1219,6 @@ static short ramp_step(Ramp *r)
     if(reached) { r->value=r->target; r->step=0; }
     return((short)(r->value>>16));
 }
-
-static short clamp16(long v) { return((short)(v<-32768?-32768:v>32767?32767:v)); }
 
 // Mupen64Plus alist_envmix_lin (naudio ENVMIXER): the left and right volume
 // ramp linearly; each sample is added to dry left/right and wet left/right
@@ -1461,9 +1472,11 @@ case 0xD: // INTERLEAVE
         st2.snd_interl++;
         sst.envmixcnt=0;
     } break;
-case 0x0E: // POLEFILTER
-    {
-        // ignored
+case 0x0E: // NAUDIO_02B0 (Mupen64Plus): code inside SETVOL, the low half
+    {        // of the right ramp's rate. Taken for a pole filter and
+             // ignored, the right volume ramped at a stale rate: Star Fox's
+             // voices crackled.
+        nau.rate[1]=(int)(((dword)nau.rate[1]&~0xffffu)|(cmd[1]&0xffff));
     } break;
 case 0x9: // SETVOL (Mupen64Plus alist_naudio SETVOL)
     {
@@ -1693,9 +1706,10 @@ void slist_mario(OSTask_t *task)
                 int rate=FIELD(cmd[1], 0,16);
                 switch(flag)
                 {
-                case  8: sst.env_lteff=rate;
+                case  8: sst.env_lteff=rate; // A_AUX: wet in w2, dry in w1
                          sst.env_rteff=rate;
-                         // rate should also affect something, pan?
+                         sst.env_dry=(short)vol;
+                         sst.env_dryset=1;
                          break;
                 case  6: sst.env_ltvol=vol;
                          break;
@@ -1809,7 +1823,10 @@ void slist_zelda(OSTask_t *task)
                 }
                 if(st.dumpsnd) loga("%04X -> %04X (%03X) flags %02X",in,out,count,flags);
             } break;
-        case 0x9:  // MEMLOOP
+        case 0x1A: // DUPLICATE's opcode in Star Fox, F-Zero, Wave Race (J)
+                   // (Mupen64Plus alist_nead): unknown here, Star Fox's
+                   // stale buffers were mixed in and its sound crackled
+        case 0x9:  // MEMLOOP (DUPLICATE: Zelda, Yoshi, 1080)
             {
                 int in,out,count;
                 count=FIELD(cmd[0],16,8)*128;
@@ -1897,34 +1914,22 @@ void slist_zelda(OSTask_t *task)
                 state=cmd[1];
                 if(st.dumpsnd) loga("%04X -> %04X (%03X) speed %04X",
                     sst.in,sst.out,sst.cnt,speed);
-                resample(state,sst.in,sst.out,sst.cnt,flags,speed);
+                // Mupen64Plus alist_nead RESAMPLE: the microcode's filter;
+                // the linear one differed from it by up to 52743 (Star Fox)
+                resample_lut(state&0xffffff,sst.in,sst.out,(sst.cnt+15)&~15,
+                    flags&1,(dword)(speed&0xffff)<<1);
             } break;
         case 0x12: // ENVSET1
-            {
-                sst.env_lteff=FIELD(cmd[0], 8,16)&0xff00;
-                sst.env_rteff=(short)(FIELD(cmd[0], 0,16)&0xffff)+sst.env_lteff;
-                sst.env_ltadd=(short)(FIELD(cmd[1],16,16)&0xffff);
-                sst.env_rtadd=(short)(FIELD(cmd[1], 0,16)&0xffff);
-            } break;
+            envset1_nead(cmd[0],cmd[1]);
+            break;
         case 0x16: // ENVSET2
-            {
-                sst.env_ltvol=FIELD(cmd[1], 0,16)&0xffff;
-                sst.env_rtvol=FIELD(cmd[1],16,16)&0xffff;
-            } break;
+            envset2_nead(cmd[1]);
+            break;
         case 0x13: // ENVMIXER
-            {
-                int src =FIELD(cmd[0],16,8)*16;
-                int cnt =FIELD(cmd[0], 8,8)*2 ;
-                int flag=FIELD(cmd[0], 0,8)   ;
-                int dst1=FIELD(cmd[1],24,8)*16;
-                int dst2=FIELD(cmd[1],16,8)*16;
-                int tmp1=FIELD(cmd[1], 8,8)*16;
-                int tmp2=FIELD(cmd[1], 0,8)*16;
-                if(st.dumpsnd) loga("%04X -> %04X,%04X,%04X,%04X (%03X)",
-                    src,dst1,dst2,tmp1,tmp2,cnt);
-                envmix_zelda(src,dst1,dst2,tmp1,tmp2,cnt);
-                st2.snd_envmix++;
-            } break;
+            if(st.dumpsnd) loga("%08X %08X",cmd[0],cmd[1]);
+            envmix_nead(cmd[0],cmd[1]);
+            st2.snd_envmix++;
+            break;
         case 0x4: // MIXER2
         case 0xC: // MIXER
             {
@@ -1952,6 +1957,13 @@ void slist_zelda(OSTask_t *task)
                 int left=cmd[1]>>16;
                 int right=cmd[1]&0xffff;
                 int cnt=((cmd[0]>>16)&255)*16;
+                if(neadsf)
+                { // INTERLEAVE_MK (Mupen64Plus): SETBUFF's output and count,
+                  // none when that is 0. Star Fox's went to DMEM 0.
+                    if(!sst.cnt) break;
+                    dst=sst.out;
+                    cnt=sst.cnt;
+                }
                 if(!cnt) cnt=sst.cnt;
                 if(st.dumpsnd) loga("%04X,%04X -> %04X (%03X)",
                     left,right,dst,cnt);
@@ -2053,7 +2065,10 @@ static int slist_detectucode(OSTask_t *task)
         case 0x1eac11b8: // Animal Crossing
         case 0x1f701238: // Mario Artist Talent Studio
         case 0x1f4c1230: // F-Zero X Expansion
-            type=AUDIO_ZELDA; name="NEAD"; break;
+            type=AUDIO_ZELDA; name="NEAD";
+            neadmk=(v==0x11181350);
+            neadsf=(v==0x11181350 || v==0x110412cc || v==0x111812e0);
+            break;
         case 0x00010010: // Indiana Jones, Battle for Naboo
             if(cart.musyxhle) { type=AUDIO_MUSYX2; name="MusyX v2"; }
             else { type=AUDIO_NONE; name="MusyX v2 (RSP)"; }
@@ -2084,9 +2099,12 @@ static int slist_detectucode(OSTask_t *task)
 // can slist_execute run this audio task? MusyX without musyxhle can't: its
 // tasks go to the RSP interpreter, and the game's AI buffers are played
 // (slist_nextbuffer plays every buffer the AI takes). The World Is Not
-// Enough.
+// Enough. rspaudio=1 sends every audio task there, as ares runs them:
+// Star Fox 64's naudio HLE crackled (thousands of full-scale jumps a
+// minute), its microcode on the RSP didn't.
 int slist_hle(OSTask_t *task)
 {
+    if(cart.rspaudio) return(0);
     return(slist_detectucode(task)!=AUDIO_NONE);
 }
 

@@ -19,6 +19,9 @@ static int   rsp_waiting;
 // (n64-systemtest "RSP running in parallel to the CPU").
 #define RSP_START 64
 static int   rsp_budget=RSP_START;
+// the task on the RSP is an audio one (rspaudio=1, MusyX): its time goes to
+// the sound share of the GUI's performance display, as the HLE's does
+int          rsp_audiotask;
 
 static void rsp_checkinterrupts(void)
 {
@@ -129,9 +132,13 @@ void rsp_run(void)
     // rest runs from lle_burststart while rsp_pending()
     rsp_cxd4_budget(rsp_budget);
     rsp_budget=RSP_START;
-    prof_begin(PROF_RSP);
-    rsp_waiting=rsp_cxd4_run();
-    prof_end(PROF_RSP);
+    {
+        int t0=rsp_audiotask?timer_us(&st2.timer):0;
+        prof_begin(PROF_RSP);
+        rsp_waiting=rsp_cxd4_run();
+        prof_end(PROF_RSP);
+        if(rsp_audiotask) st.us_audio+=timer_us(&st2.timer)-t0;
+    }
     RSP2[0]&=0xffc; // cxd4 keeps SP_PC as an IMEM address; the CPU reads the PC
     rsp_checkinterrupts();
     rsp_dpcresume(); // the RSP may have cleared DPC_STATUS.FREEZE
@@ -181,8 +188,13 @@ void rsp_runtask(const void *task)
     RSP2[0]=0;                // SP_PC
     RSP[4]&=~0x003u;          // SP_STATUS: not halted, not broken
     rsp_cxd4_budget(0);       // to completion (the HLE caller waits for it)
-    for(i=0;i<1000;i++)       // it may stop to poll SP_STATUS: resume
-        if(!rsp_cxd4_run()) break;
+    rsp_audiotask=(w[0]==2);
+    {
+        int t0=rsp_audiotask?timer_us(&st2.timer):0;
+        for(i=0;i<1000;i++)   // it may stop to poll SP_STATUS: resume
+            if(!rsp_cxd4_run()) break;
+        if(rsp_audiotask) st.us_audio+=timer_us(&st2.timer)-t0;
+    }
     RSP[4]|=0x001u;           // halted
 }
 

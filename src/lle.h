@@ -43,6 +43,7 @@ extern "C" {
 #define LLE_IMPORTANT_MIN 18
 
 extern int lle_jumped; // set when exception entry/ERET changed the PC (cpuc.c)
+int lle_sptaskpending(void); // an HLE task's end waits for its SP interrupt
 
 void  lle_decide(int important,int importanttotal,int hasrescan); // after the boot OS search
 void  lle_burststart(int burst); // cpu_exec, before each instruction burst

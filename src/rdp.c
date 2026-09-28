@@ -1826,18 +1826,22 @@ void txt_masksize(Tile *t,dword *cmd)
         cmd[1]=(cmd[1]&~(0x3ff<<2))|((FIELD(cmd[0],2,10)+(1<<t->maskt)-1)<<2);
         t->cmt&=~2;
     }
-    // the other way: a wrapping tile whose mask is wider than the tile,
-    // read with an up-scaling shift (11..15), samples texels past its size,
-    // up to the mask or one TMEM line. SF Rush draws its HUD digits from a
+    // Without clamp, SETTILESIZE's bounds do not limit the wrap period.
+    // Rush 2 scrolls a 128x64 I4 shine map with a zero lower-right corner;
+    // keeping those 1x1 bounds produced a zero-width upload and opaque white
+    // highlights. Expand both axes to their masks, regardless of shift.
+    // Limit the width to one TMEM line. SF Rush draws its HUD digits from a
     // 16 texel CI8 tile plus the same bytes as CI4 with S doubled and mask
     // 32; built 16 wide, the CI4 half wrapped inside the first 8 bytes and
     // drew an X over the digits.
-    if(!(t->cms&2) && t->masks && t->masks<=10 && (1<<t->masks)>ws && t->shifts>=11)
+    if(!(t->cms&2) && t->masks && t->masks<=10 && (1<<t->masks)>ws)
     {
         int w=1<<t->masks,line=(t->tmemrl*2)>>t->bpp; // texels per TMEM line
         if(line>0 && w>line) w=line;
         if(w>ws) cmd[1]=(cmd[1]&~(0x3ff<<14))|((FIELD(cmd[0],14,10)+w-1)<<14);
     }
+    if(!(t->cmt&2) && t->maskt && t->maskt<=10 && (1<<t->maskt)>wt)
+        cmd[1]=(cmd[1]&~(0x3ff<<2))|((FIELD(cmd[0],2,10)+(1<<t->maskt)-1)<<2);
 }
 
 // repeats the mx*my texels in src across dx*dy, mirroring every other copy

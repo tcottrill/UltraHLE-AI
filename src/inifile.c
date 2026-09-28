@@ -319,6 +319,10 @@ void inifile_command(char *cmd)
     {
         cart.rspgfx=atoi(param);
     }
+    else IFIS(cmd,"rspaudio")
+    {
+        cart.rspaudio=atoi(param);
+    }
     else IFIS(cmd,"countperop")
     {
         cart.countperop=atoi(param);

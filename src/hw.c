@@ -184,6 +184,15 @@ void hw_sp_startgfx(void)
     }
 }
 
+// an HLE task has ended: SP_STATUS halt. In LLE mode it waits for the task's
+// SP interrupt (lle.c lle_irqfired), which sets it: a game polling halt
+// would otherwise start its next task before that interrupt (Ogre Battle 64)
+static void sp_sethalt(void)
+{
+    if(st.lleos && lle_sptaskpending()) spstatus&=~1;
+    else                                spstatus|=1;
+}
+
 // once per game (hw_init): Rush 2049 asks for a yield of each HLE task it
 // can no longer yield, dozens a second
 static int yieldwarned;
@@ -211,7 +220,7 @@ void hw_sp_yield(void)
     // remove signal 0
     spstatus&=~(1<<7);
     // mark that task has halted
-    spstatus|=1;
+    sp_sethalt();
     RSP[4]=spstatus;
 }
 
@@ -294,14 +303,14 @@ void hw_sp_check(void)
     {
         // gfx task ended
         hw_sp_endgfx();
-        spstatus|=1;
+        sp_sethalt();
         RSP[4]=spstatus;
     }
     // a paused list (not while yielded): has the CPU written more of it?
     if(spgfxexecuting==3 && !spgfxyielded && !(spstatus&1) && !dlist_resume())
     {
         hw_sp_endgfx();
-        spstatus|=1;
+        sp_sethalt();
         RSP[4]=spstatus;
     }
 }
@@ -416,7 +425,7 @@ void hw_sp_statuswrite(void)
 
     // a task still on the RSP interpreter (LLE) stays running
     if((spgfxexecuting && !spgfxyielded) || (st.lleos && rsp_pending())) spstatus&=~1;
-    else               spstatus|=1;
+    else               sp_sethalt();
     RSP[4]=spstatus;
 }
 
@@ -447,6 +456,8 @@ void hw_sp_dmawrite(void)
         // Squadron's Factor 5 microcode has no HLE)
         if(sptask.type==1 && cart.rspgfx && st.lleos) sprsp=1;
         else if(sptask.type==1 || sptask.type==2) sprsp=0;
+        rsp_audiotask=(sptask.type==2); // its RSP time counts as sound
+
         LOGH(" Taskload (type=%i, flags=%i) ",sptask.type,sptask.flags);
     }
     LOGH("\n");

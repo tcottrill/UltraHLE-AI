@@ -37,6 +37,7 @@ void rsp_dma(int toram);
 void rsp_run(void);
 void rsp_runfor(int instructions); // rsp_run with that many instructions
 int  rsp_pending(void);  // the RSP stopped polling SP_STATUS, run it again
+extern int rsp_audiotask; // an audio task is on the RSP: its time is sound time
 int  rsp_sliced(void);   // it stopped at the end of its slice: run it next burst
 
 // HLE OS mode: runs an OSTask (16 host-order words as in RDRAM) that has no

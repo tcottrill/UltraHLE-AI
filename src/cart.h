@@ -50,6 +50,7 @@ typedef struct
     int    pak;        // controller accessory: PAK_MEMORY (0), PAK_RUMBLE, PAK_NONE (ultra.ini pak=)
     int    rspgfx;     // LLE: gfx tasks run on the RSP interpreter, raw RDP (ultra.ini)
     int    musyxhle;   // MusyX audio tasks run by musyx.c, not the RSP (ultra.ini)
+    int    rspaudio;   // audio tasks run their microcode on the RSP, no sound list HLE (ultra.ini)
     int    RESERVED[2];
 
     // gfx and sound modes
