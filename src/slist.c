@@ -2223,7 +2223,24 @@ static struct
     qword t;       // os_aiclock up to which len[0] has played
 } hai;
 
+// AI_LEN and AI_STATUS read back the FIFO (as lle.c's ai_regs), for a game
+// whose own osAiSetNextBuffer runs: __osAiDeviceBusy tests the full bit
+static void hai_regs(void)
+{
+    if(st.lleos) return;
+    RAI[1]=hai.cnt?hai.len[0]:0;
+    RAI[3]=(hai.cnt==2?0x80000001u:0)|(hai.cnt?0x40000000u:0);
+}
+
+static void hai_drain(void);
+
 void slist_aiupdate(void)
+{
+    hai_drain();
+    hai_regs();
+}
+
+static void hai_drain(void)
 {
     qword  now=os_aiclock();
     double rate=st.audiorate*4.0/os_clockrate(); // bytes per clock
@@ -2272,6 +2289,7 @@ int slist_nextbuffer(dword m_addr,int bytes)
             os_event(OS_EVENT_AI);
         }
     }
+    hai_regs();
 
     ret=0;
     if(KOE) print("--nextbuf %08X/%04X (cputime=%08X)\n",m_addr,bytes,(int)st.cputime);

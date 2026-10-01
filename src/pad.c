@@ -90,6 +90,7 @@ void pad_enablejoy(int enable)
 // debugger "autopad": buttons pressed for 3 retraces every autoperiod, for
 // unattended test runs (keyboard input would reach the user's desktop)
 int pad_automask,pad_autoperiod;
+int pad_autostickx,pad_autosticky; // stick held while autopad runs (autopad <period> <mask> <x> <y>)
 static int autocount;
 
 void pad_buttons(void)
@@ -393,7 +394,8 @@ void pad_drawframe(void)
         if(pad_autoperiod>0)
         {
             mypad.button=(autocount%pad_autoperiod<3)?pad_automask:0;
-            mypad.stickx=mypad.sticky=0;
+            mypad.stickx=pad_autostickx;
+            mypad.sticky=pad_autosticky;
         }
         return;
     }

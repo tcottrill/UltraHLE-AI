@@ -307,6 +307,10 @@ void inifile_command(char *cmd)
     {
         cart.fbwrite=atoi(param);
     }
+    else IFIS(cmd,"depthwrite")
+    {
+        cart.depthwrite=atoi(param);
+    }
     else IFIS(cmd,"keepframe")
     {
         cart.keepframe=atoi(param);
@@ -323,9 +327,17 @@ void inifile_command(char *cmd)
     {
         cart.rspaudio=atoi(param);
     }
+    else IFIS(cmd,"vifb")
+    {
+        cart.vifb=atoi(param);
+    }
     else IFIS(cmd,"countperop")
     {
         cart.countperop=atoi(param);
+    }
+    else IFIS(cmd,"gfxtime")
+    {
+        cart.gfxtime=atoi(param);
     }
     else IFIS(cmd,"eeprom")
     {

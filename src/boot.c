@@ -43,6 +43,19 @@ void boot_boot(void)
         }
     }
 
+    // IPL3 copies its second stage to RDRAM and runs it there: the 6105
+    // one is IPL3 0x554..0x887 at RDRAM 4 (N64-IPL ipl3.s, block17s to
+    // pifipl3e), and what nothing overwrites stays. Donkey Kong 64 reads
+    // 0xA00002E8 (IPL3 0x838, 0xC86E2000) at 80611730 and stops freeing
+    // memory when it isn't there: the DK Rap froze once its list of blocks
+    // to free was full. Before the words at 0x300, which that stage writes
+    // over its own end
+    if(cart.cic==6105)
+    {
+        for(a=0x554;a<0x888;a+=4)
+            mem_write32(0xA0000004+(a-0x554),mem_read32(0x10000000+a));
+    }
+
     // what IPL3 leaves in low memory, HLE and LLE alike (decompals N64-IPL
     // ipl3.s): osTvType from the PIF (Mupen64Plus get_tv_type, by the header
     // country code), osVersion 0 as in Mupen64Plus, osCicId only from the
@@ -63,6 +76,18 @@ void boot_boot(void)
     mem_write32(0x80000310,cart.cic==6106?6104:(cart.cic==6103 || cart.cic==6105)?cart.cic:0); // osCicId
     mem_write32(0x80000314,0);          // osVersion
     mem_write32(0x80000318,mem.ramsize); // osMemSize
+
+    // The 6105 boot also leaves two of IPL3's own instructions high in
+    // RDRAM (its RSP program's DMAs), and libultra's boot RAM tests read
+    // them back (osBootRamTest1/2_6105 in the Jet Force Gemini decomp;
+    // Daedalus writes the second for Donkey Kong 64). Without them
+    // Banjo-Tooie took itself for a copy: the right intro map loaded, but
+    // its cutscene never ran
+    if(cart.cic==6105)
+    {
+        mem_write32(0xA02FB1F4,0xAD090010); // sw t1,0x10(t0)  osCicId
+        mem_write32(0xA02FE1C0,0xAD170014); // sw s7,0x14(t0)  osVersion
+    }
 
     // IPL3 clears the RSP memory before jumping to the game (N64-IPL ipl3.s;
     // the 6106 part is XOR-encrypted there, decrypted with seed 0x85): 6103
@@ -125,7 +150,7 @@ void boot_boot(void)
     { // Load IPL3 into DMEM and see what happens :)  (IPL1 and IPL2 are skipped because they require a PIF-ROM)
         mem_writerangeraw(DMEM_ADDRESS+0x40,0xfc0,cart.data+0x40);
         pc = DMEM_ADDRESS + 0x40;
-        RA.d = 0xA0001000;
+        RA.q = (qword)(qint)(int)0xA0001000;
     }
     else
     { // C-Boot: IPL3 copies 1MB after the header; a smaller ROM (libdragon

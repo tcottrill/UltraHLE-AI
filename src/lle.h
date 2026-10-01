@@ -34,6 +34,10 @@ extern "C" {
 // Timing (instructions); Count advances COUNT_NUM/COUNT_DEN per instruction
 #define COUNT_NUM        3
 #define COUNT_DEN        4
+// Count when the game starts: the boot ROMs aren't run (boot.c), but their
+// time has passed. IPL3 reads the game's first 1MB from the cart a word at
+// a time (about 2us each on the PI bus) and checksums it: about 0.6 s
+#define COUNT_BOOT       28125000
 #define RSP_TASK_DELAY   20000
 #define PI_DMA_DELAY     1000
 #define SI_DELAY         2000
@@ -53,6 +57,9 @@ void  lle_exception(int code);   // raise a CPU exception (SYSCALL, BREAK, trap)
 void  lle_rspinterrupt(int on);  // MI SP interrupt set/cleared by the RSP interpreter
 int   lle_mipending(dword bit);  // MI_INTR bit raised (not yet acknowledged)?
 int   lle_framedone(void);       // countperop game has run its frame: wait for the retrace
+// screen size from VI_WIDTH, H_VIDEO, V_VIDEO, X_SCALE, Y_SCALE (LLE: the
+// registers at retrace; HLE: the game's osViSetMode)
+void  vi_screensize(dword viwidth,dword hvideo,dword vvideo,dword xscale,dword viyscale);
 
 // IS-Viewer 64 debug port (cart space): libdragon's debugf/assert output.
 // Text at +0x20, a store of its length to +0x14 prints it to ultra.log.
@@ -68,9 +75,16 @@ void  lle_load(FILE *f1);        // missing in older states: nothing loaded
 // TLB miss: unmapped KUSEG/KSEG2/KSEG3 pages (and the store side of clean
 // pages) point at a miss page; a CPU fetch, load (write=0) or store
 // (write=1) there raises TLBL/TLBS/Mod and returns 1
+// The page test is done in place: a call for every fetch and access of a
+// game that runs TLB-mapped (Factor 5's at 0x40000000) took 5% of the host's
+// time in Battle for Naboo.
 int   lle_checkmiss(dword addr,int write);
+extern dword lle_misspage[1024];
+#define LLE_MISSPAGE(a,w) (((w)?mem.lookupw[(dword)(a)>>12]:mem.lookupr[(dword)(a)>>12])+ \
+                           ((dword)(a)&~0xfffu)==(byte *)lle_misspage)
 #define LLE_TLBMISS(a,w) (st.lleos && ((dword)(a)<0x80000000 || \
                           (dword)(a)>=0xC0000000) && \
+                          LLE_MISSPAGE(a,w) && \
                           lle_checkmiss((dword)(a),(w)))
 
 // COP0 in LLE mode (cpuc.c op_scc)
@@ -94,6 +108,9 @@ void  cache_write32(dword a,dword v);
 void  cache_write16(dword a,dword v);
 void  cache_write8(dword a,dword v);
 dword cache_fetch(dword a);         // instruction fetch
+int   cache_fetchk0(dword a,dword *op); // KSEG0 kernel fetch that hits the I-cache (c_exec)
+extern dword *fetch_words;          // the last fetched I-cache line (c_exec's fast path)
+extern dword  fetch_base,fetch_gen,fetch_status;
 void  cache_op(int op,dword a);     // the CACHE instruction
 void  cache_flushall(void);         // write back dirty D-cache lines (save state)
 void  cache_reset(void);            // invalidate both (reset, state load)

@@ -189,6 +189,15 @@ int   dllimit;
 int   errors;
 dword cmd[8]; // current loaded command
 
+// the last commands walked (address, word 0, word 1), printed to the log at
+// the first unknown command of a list, so a rare bad jump can be traced
+// without a dump running (BattleTanx level 2 ran into texture data)
+#define DL_HIST 24
+static dword dl_hist[DL_HIST][3];
+static int   dl_histn;       // commands recorded in this list
+static int   dl_histshown;   // this list's history already printed
+static int   dl_histdumps;   // histories printed this session
+
 float identity[16]={
  1.0,   0.0,   0.0,   0.0,
  0.0,   1.0,   0.0,   0.0,
@@ -772,6 +781,7 @@ void g_loadvtx(dword addr,int v0,int vn)
     float  *m=gst.xform;
     float   cbfddirs[12][3];
     int     cbfdlit=gst.cbfd && gst.lightvx;
+    int     ortho;
 
     st2.gfx_vxin+=4;
 
@@ -785,6 +795,7 @@ void g_loadvtx(dword addr,int v0,int vn)
         g_xformlights();
     }
     if(cbfdlit) g_cbfdxformlights(cbfddirs);
+    ortho=m[3+0*4]==0.0f && m[3+1*4]==0.0f && m[3+2*4]==0.0f;
 
     rdp_newvtx(v0,vn);
 
@@ -857,10 +868,32 @@ void g_loadvtx(dword addr,int v0,int vn)
         v->pos[0]=x*m[0+0*4]+y*m[0+1*4]+z*m[0+2*4]+m[0+3*4];
         v->pos[1]=x*m[1+0*4]+y*m[1+1*4]+z*m[1+2*4]+m[1+3*4];
         v->pos[2]=x*m[3+0*4]+y*m[3+1*4]+z*m[3+2*4]+m[3+3*4]; // from W!!
-        if(i<256)
         {
             float zc=x*m[2+0*4]+y*m[2+1*4]+z*m[2+2*4]+m[2+3*4];
-            g_vxzs[i]=v->pos[2]>0.0f?zc/v->pos[2]*g_vpzscale+g_vpztrans:-1.0f;
+            if(i<256)
+                g_vxzs[i]=v->pos[2]>0.0f?zc/v->pos[2]*g_vpzscale+g_vpztrans:-1.0f;
+            // Orthographic projection: w is the same for every vertex, so
+            // depth from w can't order anything. Use the real z/w instead.
+            // Harvest Moon 64's title draws its layers out of order at
+            // z 32..88 and relies on the z buffer; at equal depth the sky
+            // and grass (drawn later) covered the logo, sign and dog.
+            if(ortho && v->pos[2]>0.0f)
+            {
+                float zs=zc/v->pos[2]*0.5f+0.5f;
+                v->zs=zs<0.0f?0.0f:(zs>1.0f?1.0f:zs);
+            }
+            // Perspective: the RDP's depth too, z/w through the viewport
+            // (0..G_MAXZ). Depth from w is in each projection's own units:
+            // Road Rash 64 draws its scene in passes whose projections differ
+            // by a scale (near planes 4, 10 and 100), the same picture with
+            // w ten times apart, and the road covered the riders.
+            else if(v->pos[2]>0.0f)
+            {
+                // Viewport Z has ten fractional bits (GLideN64 gSPViewport).
+                // Dividing by G_MAXZ instead shifts the CPU-visible depth.
+                float zs=(zc/v->pos[2]*g_vpzscale+g_vpztrans)*(1.0f/1024.0f);
+                v->zs=zs<0.0f?0.0f:(zs>1.0f?1.0f:zs);
+            }
         }
 
         // clipcheck
@@ -1218,6 +1251,36 @@ void g_loadmtx(dword pos,int proj,int load,int push)
     }
 }
 
+// G_MV_MATRIX (gSPForceMatrix): the game hands over the combined matrix
+// itself, 64 bytes of s15.16 like a G_MTX, and the G_MW_FORCEMTX after it
+// keeps the RSP from recomputing it. Star Wars Episode I Racer builds every
+// object's matrix on the CPU; its projection on the stack has no camera
+// position, so from the stacks the scene was drawn off screen.
+// The next G_MTX or G_POPMTX recomputes xform from the stacks, as the RSP does.
+void g_forcemtx(dword pos)
+{
+    ushort sh[32];
+    int    i,x;
+
+    for(i=0;i<32;i+=2)
+    {
+        x=mem_read32p(pos+i*2);
+        sh[i+0]=x>>16;
+        sh[i+1]=x;
+    }
+    for(i=0;i<16;i++)
+    {
+        gst.xform[i]=(float)(((int)sh[i]<<16) | (int)sh[i+16])*(1.0/65536.0);
+    }
+    gst.newmatrices=0;
+
+    if(st.dumpgfx)
+    {
+        logd(" forcematrix\n{ Forced Xform:");
+        DumpMatrix(gst.xform);
+    }
+}
+
 void g_popmtx(int num)
 {
     int proj=0;
@@ -1483,11 +1546,14 @@ void c_modifyvtx(void)
         v->tex[1]=(float)(short)val;
         // scaled like a loaded vertex (g_initvx): Chef's Luv Shack's title
         // tiles are 64 texels at scale 0.5 with ST 0..127; unscaled, the
-        // clamp smeared the last texel over half of every letter
+        // clamp smeared the last texel over half of every letter. A scale
+        // of 0 counts as 1 (GLideN64 gSPTexture): Harvest Moon 64 sets
+        // G_TEXTURE 0,0 before giving every ground tile its ST this way,
+        // and scaled by 0 all of them sampled one texel (flat colours)
         if(gst.texenable)
         {
-            v->tex[0]*=gst.scales;
-            v->tex[1]*=gst.scalet;
+            if(gst.scales!=0.0f) v->tex[0]*=gst.scales;
+            if(gst.scalet!=0.0f) v->tex[1]*=gst.scalet;
         }
         logd(" modifyvtx %i st %.2f %.2f",i,v->tex[0]/32,v->tex[1]/32);
         break;
@@ -1721,6 +1787,10 @@ void c_movemem_zelda(int ind,dword a)
         gst.cbfdnormals=addr;
         logd(" normals at %08X",addr);
     }
+    else if((cmd[0]&0xff)==14)
+    { // G_MV_MATRIX
+        g_forcemtx(addr);
+    }
     else if(ind>=0x0806 && ind<=0x0806+3*8)
     {
         i=(ind-0x0806)/3;
@@ -1881,6 +1951,20 @@ void dlisterror(void)
     if(gst.errorcnt[c]<10)
     {
         error("dlist: unknown command %08X %08X at %08X",cmd[0],cmd[1],dlpnt);
+    }
+    if(!dl_histshown && dl_histdumps<4)
+    {
+        int i,n=dl_histn<DL_HIST?dl_histn:DL_HIST;
+        dl_histshown=1;
+        dl_histdumps++;
+        print("dlist: the %i commands up to the unknown one (stack depth %i):\n",n,stackp);
+        for(i=dl_histn-n;i<dl_histn;i++)
+        {
+            dword *h=dl_hist[i%DL_HIST];
+            print("  %08X: %08X %08X\n",h[0],h[1],h[2]);
+        }
+        for(i=1;i<(int)stackp && i<8;i++) print("  return %i: %08X\n",i,stack[i]);
+        for(i=0;i<16;i++) if(gst.segment[i]) print("  segment %X = %08X\n",i,gst.segment[i]);
     }
 }
 
@@ -2712,8 +2796,13 @@ void rsp_cmd_zelda(int c)
 
 /***********************************************************************/
 
+// an abandoned list still ends its frame and reports DP done, as its
+// FULLSYNC would have: the game's scheduler waits for that interrupt, and
+// BattleTanx froze (audio still running) after "too many errors"
 void dlist_abort(void)
 {
+    rdp_frameend();
+    st2.gfxdpsyncpending=1;
 }
 
 /***********************************************************************
@@ -2841,6 +2930,12 @@ int dlist_execute(OSTask_t *task)
 
     dl_wait=0;
     dl_cmdcnt=0;
+    // the limit is per list: BattleTanx puts one bad word (a palette frame
+    // past its table, the game's own data) in every frame, and a session
+    // count reached 100 after a few minutes of play
+    errors=0;
+    dl_histn=0;
+    dl_histshown=0;
     if(gst.ignore)
     {
         os_event(OS_EVENT_SP);
@@ -3009,6 +3104,10 @@ static int dlist_walk(void)
             dumpcmd(dlpnt,cmd);
             logd(NULL); // flush
         }
+        dl_hist[dl_histn%DL_HIST][0]=dlpnt;
+        dl_hist[dl_histn%DL_HIST][1]=cmd[0];
+        dl_hist[dl_histn%DL_HIST][2]=cmd[1];
+        dl_histn++;
         dlpnt+=8;
 
         if(dl_cmdcnt++>200000) // a runaway walk; Destruction Derby races run 20000+

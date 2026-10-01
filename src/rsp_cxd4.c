@@ -59,6 +59,7 @@ void rsp_cxd4_init(const RspCxd4Info *info)
     RSP_INFO_NAME.CheckInterrupts=info->checkinterrupts;
     RSP_INFO_NAME.ProcessRdpList =info->processrdplist;
     cxd4_message=info->message;
+    cxd4_dmatoram=info->dmatoram;
 
     DRAM=info->rdram;
     DMEM=info->dmem;
@@ -86,6 +87,11 @@ void rsp_cxd4_init(const RspCxd4Info *info)
 void rsp_cxd4_budget(int instructions)
 {
     cxd4_budget=instructions;
+}
+
+unsigned long long rsp_cxd4_ran(void)
+{
+    return(cxd4_ran);
 }
 
 int rsp_cxd4_run(void)

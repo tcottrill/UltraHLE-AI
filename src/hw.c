@@ -2,8 +2,14 @@
 
 #define LOGH if(st.dumphw) logh
 
+void hw_sp_check(void);
+
 void hw_checkoften(void)
 {
+    // a gfxtime task ends here too: a game waiting for its message
+    // touches no register (hw_memio)
+    if(cart.gfxtime>0) hw_sp_check();
+
     // Frequently used hardware checks here. Probably things like
     //   interrupts, dma, pads
     // to avoid the cpu having to wait for them too long. This
@@ -70,6 +76,22 @@ void hw_checkseldom(void)
             RVI[10]^=1;
         }
     }
+
+    // AI_DACRATE, written by the game's own osAiSetFrequency when the HLE
+    // one wasn't found (Donkey Kong 64): without it the rate stayed at the
+    // 32000 Hz default, the game made its 22 kHz and the sound skipped.
+    // Only a new value counts, and not the 0x3FFF osInitialize leaves
+    // there: Jet Force Gemini's osAiSetFrequency is found, and that one
+    // stayed in the register as 2971 Hz
+    if(!st.lleos)
+    {
+        static dword lastdacrate;
+        if(WAI[4]!=lastdacrate)
+        {
+            lastdacrate=WAI[4];
+            if(WAI[4] && WAI[4]!=0x3fff) osAiSetFrequency(48681812/(WAI[4]+1));
+        }
+    }
 }
 
 void hw_check(void)
@@ -125,6 +147,7 @@ static OSTask_t sptask;
 static int      sploaded;
 static int      spgfxexecuting; // 0=not, 1=yup, 2=done, 3=list paused (dlist_resume)
 static int      spgfxyielded;   // the paused list was yielded: it waits for its restart
+static qword    spgfxdone;      // gfxtime: sync_clock at which the drawn task reports done (0 = at once)
 
 // NOT USED RIGHT NOW
 void hw_gfxthread(void)
@@ -146,17 +169,40 @@ void hw_gfxthread(void)
     x_sleep(1); // always sleep a little bit
 }
 
+// HLE DP completion is independent of SP completion. The game can freeze
+// the DP until VI has latched the swapped framebuffer (DK64's scheduler).
+static int dp_hle_pending;
+
+static void hw_dp_complete(void)
+{
+    dp_hle_pending=0;
+    sync_gfxframedone();
+    os_event(OS_EVENT_DP);
+}
+
+void hw_dp_statuswrite(dword value)
+{
+    if(value&0x01) RDP[3]&=~1u;
+    if(value&0x02) RDP[3]|=1u;
+    if(value&0x04) RDP[3]&=~2u;
+    if(value&0x08) RDP[3]|=2u;
+    if(value&0x10) RDP[3]&=~4u;
+    if(value&0x20) RDP[3]|=4u;
+    if(!(RDP[3]&2) && dp_hle_pending) hw_dp_complete();
+}
+
 void hw_sp_endgfx(void)
 {
     os_event(OS_EVENT_SP);
     if(st2.gfxdpsyncpending)
     {
-        sync_gfxframedone();
-        os_event(OS_EVENT_DP);
+        if(!st.lleos && (RDP[3]&2)) dp_hle_pending=1;
+        else hw_dp_complete();
     }
     st2.gfxdpsyncpending=0;
     spgfxexecuting=0;
     spgfxyielded=0;
+    spgfxdone=0;
 }
 
 void hw_sp_startgfx(void)
@@ -175,6 +221,17 @@ void hw_sp_startgfx(void)
         // run in the same thread; a list the game is still writing
         // waits, and hw_sp_check resumes it
         if(dlist_execute(&st2.gfxtask)) spgfxexecuting=3;
+        else if(cart.gfxtime>0 && !st.lleos)
+        { // gfxtime (ultra.ini): the RSP and RDP take time. Drawn at once,
+          // Donkey Kong 64 rendered every retrace, twice the hardware's
+          // rate; its intro cutscenes count frames while the story switches
+          // maps by osGetTime, so the first cutscene ended before the first
+          // switch and the game fell into gameplay with no Kong
+            // on the game's clock (osGetTime's, sync_clock): HLE retraces
+            // follow the host's time, so CPU clocks per frame vary
+            spgfxexecuting=2;
+            spgfxdone=sync_clock()+(qword)cart.gfxtime*os_clockrate()/1000;
+        }
         else hw_sp_endgfx();
     }
     else
@@ -182,6 +239,28 @@ void hw_sp_startgfx(void)
         // run in a separate thread
         spgfxexecuting=1;
     }
+}
+
+// save state block (after lle_save): a DP completion held by the freeze. Lost
+// in a fresh process, DK64's scheduler waited for its DP message forever
+// (sound on, no frames, no window after loading)
+#define HW_STATEMAGIC 0x31535748 // "HWS1"
+
+void hw_save(FILE *f1)
+{
+    dword magic=HW_STATEMAGIC,v;
+    fwrite(&magic,1,4,f1);
+    v=dp_hle_pending; fwrite(&v,1,4,f1);
+    v=RDP[3]&2;       fwrite(&v,1,4,f1); // freeze
+}
+
+void hw_load(FILE *f1)
+{
+    dword magic=0,v=0;
+    dp_hle_pending=0; // older states: nothing pending
+    if(fread(&magic,1,4,f1)!=4 || magic!=HW_STATEMAGIC) return;
+    fread(&v,1,4,f1); dp_hle_pending=v;
+    v=0; fread(&v,1,4,f1); RDP[3]=(RDP[3]&~2u)|(v&2);
 }
 
 // an HLE task has ended: SP_STATUS halt. In LLE mode it waits for the task's
@@ -213,7 +292,8 @@ void hw_sp_yield(void)
         {
             spstatus|=(1<<8);  // still executing, raise signal 1
         }
-        if(spgfxexecuting==3) spgfxyielded=1;
+        // a paused list, or a gfxtime task not yet done, waits for the restart
+        if(spgfxexecuting==3 || spgfxexecuting==2) spgfxyielded=1;
         // sp task done
         os_event(OS_EVENT_SP);
     }
@@ -299,7 +379,7 @@ void hw_sp_taskdone(void)
 
 void hw_sp_check(void)
 {
-    if(spgfxexecuting==2)
+    if(spgfxexecuting==2 && !spgfxyielded && (!spgfxdone || sync_clock()>=spgfxdone))
     {
         // gfx task ended
         hw_sp_endgfx();
@@ -585,6 +665,7 @@ void hw_si_pads(int write)
 
 void hw_init(void)
 {
+    dp_hle_pending=0;
     // init reg data we don't want to be 0 (default init value)
     WSI[1]=NULLFILL;
     WSI[4]=NULLFILL;

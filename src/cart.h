@@ -51,7 +51,10 @@ typedef struct
     int    rspgfx;     // LLE: gfx tasks run on the RSP interpreter, raw RDP (ultra.ini)
     int    musyxhle;   // MusyX audio tasks run by musyx.c, not the RSP (ultra.ini)
     int    rspaudio;   // audio tasks run their microcode on the RSP, no sound list HLE (ultra.ini)
-    int    RESERVED[2];
+    int    vifb;       // the game draws in its frame buffer with the CPU too: RDP drawing goes
+                       // through RDRAM and the VI's buffer is what is shown (ultra.ini)
+    int    gfxtime;    // HLE: a gfx task reports done this many ms after it starts (ultra.ini)
+    int    depthwrite; // copy GL depth to the N64 depth image at task completion
 
     // gfx and sound modes
     int    dlist_diddlyvx;

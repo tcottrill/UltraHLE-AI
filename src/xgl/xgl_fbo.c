@@ -100,7 +100,8 @@ void xgl_fbo_savefront(void)
     glBindFramebuffer(GL_READ_FRAMEBUFFER,xg.fbo);
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER,xg.frontfbo);
     glDisable(GL_SCISSOR_TEST);
-    glBlitFramebuffer(0,0,xg.xs,xg.ys,0,0,xg.xs,xg.ys,GL_COLOR_BUFFER_BIT,GL_NEAREST);
+    glBlitFramebuffer(0,0,XGL_MAINXS,XGL_MAINYS,0,0,XGL_MAINXS,XGL_MAINYS,
+                      GL_COLOR_BUFFER_BIT,GL_NEAREST);
 }
 
 void xgl_fbo_bind(void)
@@ -210,6 +211,60 @@ void x_rtt_read(int h,unsigned char *rgba,unsigned char *cover)
     xgl_fbo_bind();
 }
 
+// go on drawing into the target as x_rtt_end left it, if it is w x h still:
+// no clear, no new picture. 0 = it isn't, use x_rtt_begin
+int x_rtt_resume(int w,int h)
+{
+    if(!xg.open || !xg.rttfbo || xg.rttw!=w || xg.rtth!=h) return 0;
+    x_flush();
+    if(!xg.rtton)
+    {
+        xg.mainxs=xg.xs;
+        xg.mainys=xg.ys;
+    }
+    xg.rtton=1;
+    xg.xs=w;
+    xg.ys=h;
+    glBindFramebuffer(GL_FRAMEBUFFER,xg.rttfbo);
+    return 1;
+}
+
+// rows y0..y0+h-1 of the target (top row first), as x_rtt_read
+void x_rtt_readrows(int y0,int h,unsigned char *rgba,unsigned char *cover)
+{
+    int y,w=xg.rttw;
+    unsigned char *tmp;
+    if(!xg.rtton || h<=0 || y0<0 || y0+h>xg.rtth) return;
+    x_flush();
+    tmp=malloc(w*h*4);
+    if(!tmp) return;
+    glBindFramebuffer(GL_READ_FRAMEBUFFER,xg.rttfbo);
+    glPixelStorei(GL_PACK_ALIGNMENT,1);
+    glReadPixels(0,xg.rtth-y0-h,w,h,GL_RGBA,GL_UNSIGNED_BYTE,tmp);
+    for(y=0;y<h;y++) memcpy(rgba+y*w*4,tmp+(h-1-y)*w*4,w*4);
+    if(cover)
+    {
+        glReadPixels(0,xg.rtth-y0-h,w,h,GL_STENCIL_INDEX,GL_UNSIGNED_BYTE,tmp);
+        for(y=0;y<h;y++) memcpy(cover+y*w,tmp+(h-1-y)*w,w);
+    }
+    free(tmp);
+    xgl_fbo_bind();
+}
+
+// new pictures for rows y0..y0+h-1 of the target (rgba top row first): the
+// RDRAM they stand for has changed
+void x_rtt_writerows(int y0,int h,const unsigned char *rgba)
+{
+    int y,w=xg.rttw;
+    if(!xg.rtton || h<=0 || y0<0 || y0+h>xg.rtth) return;
+    x_flush();
+    glPixelStorei(GL_UNPACK_ALIGNMENT,1);
+    glBindTexture(GL_TEXTURE_2D,xg.rttcolor);
+    for(y=0;y<h;y++)
+        glTexSubImage2D(GL_TEXTURE_2D,0,0,xg.rtth-1-(y0+y),w,1,GL_RGBA,GL_UNSIGNED_BYTE,rgba+y*w*4);
+    glBindTexture(GL_TEXTURE_2D,0);
+}
+
 void x_rtt_cover(int cover)
 {
     if(cover==xg.rttcover) return;
@@ -233,7 +288,7 @@ void x_rtt_end(void)
 void xgl_fbo_present(void)
 {
     RECT  rc;
-    int   ww,wh,w,h,x,y;
+    int   ww,wh,w,h,x,y,xs=XGL_MAINXS,ys=XGL_MAINYS;
     float sx,sy,s;
 
     GetClientRect(xg.hwnd,&rc);
@@ -249,12 +304,12 @@ void xgl_fbo_present(void)
     glClear(GL_COLOR_BUFFER_BIT);
 
     if(ww<=0 || wh<=0) return;
-    sx=(float)ww/xg.xs;
-    sy=(float)wh/xg.ys;
+    sx=(float)ww/xs;
+    sy=(float)wh/ys;
     s =sx<sy?sx:sy;
-    w =(int)(xg.xs*s+0.5f);
-    h =(int)(xg.ys*s+0.5f);
+    w =(int)(xs*s+0.5f);
+    h =(int)(ys*s+0.5f);
     x =(ww-w)/2;
     y =(wh-h)/2;
-    glBlitFramebuffer(0,0,xg.xs,xg.ys,x,y,x+w,y+h,GL_COLOR_BUFFER_BIT,GL_LINEAR);
+    glBlitFramebuffer(0,0,xs,ys,x,y,x+w,y+h,GL_COLOR_BUFFER_BIT,GL_LINEAR);
 }

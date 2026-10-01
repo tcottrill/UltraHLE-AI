@@ -3,6 +3,7 @@
 // (XGLIDE_Decompile/api.c, fx.c).
 
 #include "xgl_internal.h"
+#include "../bootlog.h"
 #include <stdarg.h>
 
 xgl_state xg;
@@ -18,7 +19,8 @@ static LARGE_INTEGER  timebase,timefreq;
 void x_log(char *txt,...)
 {
     va_list ap;
-    if(!logfile) logfile=fopen("x.log","wt");
+    char    path[MAX_PATH];
+    if(!logfile) logfile=fopen(bootlog_path(path,"x.log"),"wt");
     if(!logfile) return;
     va_start(ap,txt);
     vfprintf(logfile,txt,ap);
@@ -34,6 +36,7 @@ void x_fatal(char *txt,...)
     vsnprintf(buf,sizeof(buf),txt,ap);
     va_end(ap);
     x_log("FATAL: %s\n",buf);
+    bootlog("FATAL: %s",buf);
     MessageBox(NULL,buf,"UltraHLE",MB_OK|MB_ICONERROR);
     exit(1);
 }
@@ -100,8 +103,9 @@ static int createcontext(void)
     HGLRC temp;
     int   fmt;
 
+    bootlog("gl: GetDC");
     xg.hdc=GetDC(xg.hwnd);
-    if(!xg.hdc) return 0;
+    if(!xg.hdc) { bootlog("gl: GetDC failed, error %lu",GetLastError()); return 0; }
 
     // A window's pixel format can be set only once; the display is closed
     // and reopened (hide3dfx), so keep the format already chosen.
@@ -114,35 +118,60 @@ static int createcontext(void)
         pfd.iPixelType=PFD_TYPE_RGBA;
         pfd.cColorBits=32;
         pfd.iLayerType=PFD_MAIN_PLANE;
+        bootlog("gl: ChoosePixelFormat");
         fmt=ChoosePixelFormat(xg.hdc,&pfd);
-        if(!fmt || !SetPixelFormat(xg.hdc,fmt,&pfd)) return 0;
+        if(!fmt) { bootlog("gl: ChoosePixelFormat failed, error %lu",GetLastError()); return 0; }
+        bootlog("gl: SetPixelFormat %d",fmt);
+        if(!SetPixelFormat(xg.hdc,fmt,&pfd))
+        {
+            bootlog("gl: SetPixelFormat failed, error %lu",GetLastError());
+            return 0;
+        }
     }
 
     // Bootstrap context, only to load wglCreateContextAttribsARB
     // (same sequence as Tempest platform/windows/sys_gl.c CreateGLContext).
+    bootlog("gl: wglCreateContext");
     temp=wglCreateContext(xg.hdc);
-    if(!temp) return 0;
-    if(!wglMakeCurrent(xg.hdc,temp)) { wglDeleteContext(temp); return 0; }
+    if(!temp) { bootlog("gl: wglCreateContext failed, error %lu",GetLastError()); return 0; }
+    if(!wglMakeCurrent(xg.hdc,temp))
+    {
+        bootlog("gl: wglMakeCurrent (bootstrap) failed, error %lu",GetLastError());
+        wglDeleteContext(temp);
+        return 0;
+    }
+    bootlog("gl: bootstrap context %s / %s / %s",glGetString(GL_VENDOR),
+            glGetString(GL_RENDERER),glGetString(GL_VERSION));
     glewExperimental=GL_TRUE;
     if(glewInit()!=GLEW_OK || !wglCreateContextAttribsARB)
     {
+        bootlog("gl: glewInit or wglCreateContextAttribsARB failed");
         wglMakeCurrent(NULL,NULL);
         wglDeleteContext(temp);
         return 0;
     }
 
+    bootlog("gl: wglCreateContextAttribsARB 3.3 core");
     xg.hrc=wglCreateContextAttribsARB(xg.hdc,0,attribs);
     wglMakeCurrent(NULL,NULL);
     wglDeleteContext(temp);
-    if(!xg.hrc || !wglMakeCurrent(xg.hdc,xg.hrc)) return 0;
+    if(!xg.hrc) { bootlog("gl: 3.3 core context failed, error %lu",GetLastError()); return 0; }
+    if(!wglMakeCurrent(xg.hdc,xg.hrc))
+    {
+        bootlog("gl: wglMakeCurrent failed, error %lu",GetLastError());
+        return 0;
+    }
 
     // Re-resolve entry points for the core context; glewInit leaves a
     // harmless GL_INVALID_ENUM behind on core profiles.
     glewExperimental=GL_TRUE;
-    if(glewInit()!=GLEW_OK) return 0;
+    if(glewInit()!=GLEW_OK) { bootlog("gl: glewInit (core) failed"); return 0; }
     while(glGetError()!=GL_NO_ERROR) {}
 
     x_log("GL_VERSION: %s\nGL_RENDERER: %s\n",glGetString(GL_VERSION),glGetString(GL_RENDERER));
+    bootlog("gl: context ready %s / %s / %s",glGetString(GL_VENDOR),
+            glGetString(GL_RENDERER),glGetString(GL_VERSION));
+    bootlog_modules("after OpenGL context");
     return 1;
 }
 
@@ -297,7 +326,7 @@ int x_readfb(int fb,int x,int y,int xs,int ys,char *buffer,int bufrowlen)
     // redrawn by then); otherwise the frame in progress.
     glBindFramebuffer(GL_READ_FRAMEBUFFER,(fb&X_FB_FRONT)?xg.frontfbo:xg.fbo);
     glPixelStorei(GL_PACK_ALIGNMENT,1);
-    glReadPixels(x,xg.ys-y-ys,xs,ys,GL_RGBA,GL_UNSIGNED_BYTE,tmp); // GL rows start at the bottom
+    glReadPixels(x,XGL_MAINYS-y-ys,xs,ys,GL_RGBA,GL_UNSIGNED_BYTE,tmp); // GL rows start at the bottom
     xgl_fbo_bind();
 
     for(row=0;row<ys;row++)
@@ -314,6 +343,39 @@ int x_readfb(int fb,int x,int y,int xs,int ys,char *buffer,int bufrowlen)
     }
     free(tmp);
     return 0;
+}
+
+// Read the main render target before the next frame clears it. GL row order.
+int x_readdepth(float *buffer,int width,int height)
+{
+    GLint previous,alignment,rowlength,pbo,skiprows,skippixels,swapbytes;
+    GLenum error;
+    if(!buffer || !x_hascontext() || width!=XGL_MAINXS || height!=XGL_MAINYS) return 1;
+    x_flush();
+    glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING,&previous);
+    glGetIntegerv(GL_PACK_ALIGNMENT,&alignment);
+    glGetIntegerv(GL_PACK_ROW_LENGTH,&rowlength);
+    glGetIntegerv(GL_PACK_SKIP_ROWS,&skiprows);
+    glGetIntegerv(GL_PACK_SKIP_PIXELS,&skippixels);
+    glGetIntegerv(GL_PACK_SWAP_BYTES,&swapbytes);
+    glGetIntegerv(GL_PIXEL_PACK_BUFFER_BINDING,&pbo);
+    glBindBuffer(GL_PIXEL_PACK_BUFFER,0);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER,xg.fbo);
+    glPixelStorei(GL_PACK_ALIGNMENT,4);
+    glPixelStorei(GL_PACK_ROW_LENGTH,0);
+    glPixelStorei(GL_PACK_SKIP_ROWS,0);
+    glPixelStorei(GL_PACK_SKIP_PIXELS,0);
+    glPixelStorei(GL_PACK_SWAP_BYTES,GL_FALSE);
+    glReadPixels(0,0,width,height,GL_DEPTH_COMPONENT,GL_FLOAT,buffer);
+    error=glGetError();
+    glPixelStorei(GL_PACK_ALIGNMENT,alignment);
+    glPixelStorei(GL_PACK_ROW_LENGTH,rowlength);
+    glPixelStorei(GL_PACK_SKIP_ROWS,skiprows);
+    glPixelStorei(GL_PACK_SKIP_PIXELS,skippixels);
+    glPixelStorei(GL_PACK_SWAP_BYTES,swapbytes);
+    glBindBuffer(GL_PIXEL_PACK_BUFFER,pbo);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER,previous);
+    return error!=GL_NO_ERROR;
 }
 
 int x_writefb(int fb,int x,int y,int xs,int ys,char *buffer,int bufrowlen)

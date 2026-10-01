@@ -55,6 +55,11 @@ static void rsp_message(const char *text)
     }
 }
 
+static void rsp_dmatoram(unsigned long first,unsigned long end)
+{
+    rdp_ramwritten((dword)first,(dword)end);
+}
+
 int rsp_init()
 {
     RspCxd4Info info;
@@ -97,6 +102,7 @@ int rsp_init()
     info.checkinterrupts=rsp_checkinterrupts;
     info.processrdplist=rsp_dpclist;
     info.message=rsp_message;
+    info.dmatoram=rsp_dmatoram;
     rsp_cxd4_init(&info);
 
     return 0;
@@ -239,6 +245,7 @@ void rsp_dpclist(void)
         }
         cur+=n*4;
     }
+    if(!inifile_softrdp()) rdp_rawlistend();
     RDP[2]=cur;
     RDP[3]&=~0x400u; // START_VALID: the new buffer was taken
 }

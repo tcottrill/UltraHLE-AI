@@ -158,6 +158,7 @@ EXPORT void    x_fullscreen(int fullscreen);
 
 EXPORT void    x_clear(int writecolor,int writedepth,float cr,float cg,float cb);
 EXPORT int     x_readfb(int fb,int x,int y,int xs,int ys,char *buffer,int bufrowlen);
+EXPORT int     x_readdepth(float *buffer,int width,int height);
 EXPORT int     x_hascontext(void); // calling thread owns the GL context
 EXPORT int     x_writefb(int fb,int x,int y,int xs,int ys,char *buffer,int bufrowlen);
 #define        X_FB_RGB565   0x11   // 16 bit rgb color
@@ -254,6 +255,8 @@ EXPORT int     x_fog(int type,float min,float max,float r,float g,float b);
 #define X_LINEAR      0x1f01
 #define X_EXPONENTIAL 0x1f02
 #define X_LINEARADD   0x1f03 // second pass add mode
+#define X_FOGSHADE    0x1f04 // the vertex alpha is the amount of fog (RDP blender, raw triangles)
+#define X_FOGSHADEINV 0x1f05 // ... of the pixel: 1 - alpha is the fog's
 
 EXPORT int     x_zrange(float znear,float zfar);
 EXPORT int     x_zdecal(float factor);
@@ -374,6 +377,11 @@ EXPORT void    x_scissor(int on,float x0,float y0,float x1,float y1); // RDP sci
 // picture, top row first, or NULL), read rows back as RGBA8, return
 EXPORT int     x_rtt_begin(int w,int h,const unsigned char *rgba);
 EXPORT void    x_rtt_read(int h,unsigned char *rgba,unsigned char *cover);
+// the same for rows y0..y0+h-1, and new pictures for such rows; resume: go
+// on with the target as x_rtt_end left it (0 = not w x h any more)
+EXPORT int     x_rtt_resume(int w,int h);
+EXPORT void    x_rtt_readrows(int y0,int h,unsigned char *rgba,unsigned char *cover);
+EXPORT void    x_rtt_writerows(int y0,int h,const unsigned char *rgba);
 EXPORT void    x_rtt_end(void);
 // cover: what later draws mark their pixels with (1..255), read back per
 // pixel by x_rtt_read (0 = not drawn since x_rtt_begin)

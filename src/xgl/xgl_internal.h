@@ -97,6 +97,12 @@ void   xgl_fbo_bind(void);
 void   xgl_fbo_present(void);
 void   xgl_fbo_savefront(void);
 
+// The main FBO's size: xs/ys are an offscreen target's while one is on, and
+// the VI can present in the middle of one (libdragon's 8 pixel wide setup
+// buffer at the start of each Flappy Bird frame showed an 8 pixel strip)
+#define XGL_MAINXS (xg.rtton?xg.mainxs:xg.xs)
+#define XGL_MAINYS (xg.rtton?xg.mainys:xg.ys)
+
 // xgl_shader.c
 int    xgl_shader_create(void);
 void   xgl_shader_destroy(void);
@@ -104,6 +110,7 @@ void   xgl_shader_destroy(void);
 // xgl_tex.c
 GLuint xgl_tex_glname(int handle);
 int    xgl_tex_nearest(int handle);
+int    xgl_tex_clamp(int handle);
 
 // xgl_state.c
 void   xgl_state_default(void);

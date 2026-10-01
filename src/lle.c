@@ -308,6 +308,10 @@ void lle_exception(int code)
     dword status=st.mmu[12].d;
     dword cause =st.mmu[13].d;
 
+    if(st.dumphw && code!=0)
+        print("lle: exception %i at %08X BadVAddr %08X RA %08X\n",
+            code,st.pc,st.mmu[8].d,st.g[31].d);
+
     if(!lle.excseen[code&31])
     {
         lle.excseen[code&31]=1;
@@ -425,6 +429,7 @@ static void lle_timer(void)
     dword count=lle_count();
     if((dword)(st.mmu[11].d-lle.lastcount-1)<(dword)(count-lle.lastcount))
     {
+        if(st.dumphw) print("lle: timer interrupt, Count %08X Compare %08X\n",count,st.mmu[11].d);
         st.mmu[13].d|=0x8000;
         lle.irqs[6]++;
         lle_checksoon();
@@ -472,6 +477,7 @@ void lle_mtc0(int reg,dword v)
         st.mmu[11].d=v;
         st.mmu[13].d&=~0x8000u;
         lle.lastcount=lle_count();
+        if(st.dumphw) print("lle: Compare <- %08X, Count %08X (pc %08X ra %08X)\n",v,lle.lastcount,st.pc,st.g[31].d);
         break;
     case 12: // Status (FR moves the FPU registers' upper halves, cpuc.c)
         cpu_fpusetfr(st.mmu[12].d&0x04000000,v&0x04000000);
@@ -570,7 +576,7 @@ void lle_dmtc0(int reg,qword v)
 ** EntryHi in KSEG0, which must not change anything.
 */
 
-static dword lle_misspage[1024];
+dword lle_misspage[1024];
 
 // all of KUSEG and KSEG2/3 (UltraHLE's own accesses use KSEG0/1, mem_phys)
 static int tlb_mappable(dword page)
@@ -1204,6 +1210,9 @@ void lle_hwwrite(dword phys)
         case 3: // PI_WR_LEN: cart -> RDRAM
             {
                 dword cartaddr=WPI[1]&0x1fffffff;
+                if(st.dumphw)
+                    print("lle: PI DMA cart %08X -> ram %08X len %X (pc %08X ra %08X)\n",
+                        WPI[1],WPI[0],WPI[3]+1,st.pc,st.g[31].d);
                 if(cartaddr>=0x10000000 && cartaddr<0x1fc00000)
                     pi_dmawrite();
                 else
@@ -1283,12 +1292,13 @@ void lle_isviewer(void)
 // half-written VI mode is never seen. Width is VI_WIDTH; height is the shown
 // half-lines times VI_Y_SCALE, widened by 240/237 for the lines NTSC crops,
 // as GLideN64's VI_UpdateSize does. Scooby-Doo draws 480x240 this way.
-static void lle_visize(void)
+// HLE passes the register values of the game's osViSetMode (p_osViSetMode).
+void vi_screensize(dword viwidth,dword hvideo,dword vvideo,dword xscale,dword viyscale)
 {
-    int w=RVI[2]&0xfff;
-    int vstart=(RVI[10]>>16)&0x3ff;
-    int vend=RVI[10]&0x3ff;
-    int yscale=RVI[13]&0xfff;
+    int w=viwidth&0xfff;
+    int vstart=(vvideo>>16)&0x3ff;
+    int vend=vvideo&0x3ff;
+    int yscale=viyscale&0xfff;
     int h,fields=0;
 
     // VI_WIDTH twice the width the VI shows (H_VIDEO times X_SCALE): each
@@ -1297,7 +1307,7 @@ static void lle_visize(void)
     // 1024 wide screen, its 512 wide buffer looked offscreen (render to
     // texture) and the screen stayed black.
     {
-        int hs=(RVI[9]>>16)&0x3ff,he=RVI[9]&0x3ff,xs=RVI[12]&0xfff,shown;
+        int hs=(hvideo>>16)&0x3ff,he=hvideo&0x3ff,xs=xscale&0xfff,shown;
         if(he>hs && xs)
         {
             shown=(he-hs)*xs/1024;
@@ -1331,6 +1341,11 @@ static void lle_visize(void)
     init.viewporthig=h;
     if(h) print("lle: screen resolution %ix%i (VI)\n",w,h);
     else  print("lle: screen width %i (VI), height not set yet\n",w);
+}
+
+static void lle_visize(void)
+{
+    vi_screensize(RVI[2],RVI[9],RVI[10],RVI[12],RVI[13]);
 }
 
 // the RSP interpreter changed the SP interrupt: set (BREAK with interrupt
@@ -1370,10 +1385,23 @@ void lle_event(int ev)
         lle_countretrace();
         ai_retrace();
         if(rsp_pending()) rsp_run(); // RSP left waiting on the CPU
-        if(softrdp_active())
-        { // the picture is the framebuffer the VI shows
-            int h=init.viewporthig?init.viewporthig:240;
-            rdp_showvi(RVI[1],RVI[2]&0xfff,h,(RVI[0]&3)==3?4:2);
+        if(softrdp_active() || cart.vifb)
+        { // the picture is the framebuffer the VI shows. Shown when the
+          // game has swapped buffers, or every 6th retrace if it draws in
+          // the one on screen: shown at every retrace, each present waited
+          // for the monitor's refresh, the emulator was behind its clock
+          // for good and the game got 30000 instructions a retrace
+          // (2048-64 at one frame a second). An origin a line or two on
+          // is the same buffer's other field.
+            static dword shown;
+            static int   age;
+            if(RVI[1]-shown>=0x2000 || ++age>=6)
+            {
+                int h=init.viewporthig?init.viewporthig:240;
+                shown=RVI[1];
+                age=0;
+                rdp_showvi(RVI[1],RVI[2]&0xfff,h,(RVI[0]&3)==3?4:2);
+            }
         }
         lle.vis++;
         RVI[4]=0;
@@ -1504,6 +1532,7 @@ void lle_decide(int important,int importanttotal,int hasrescan)
         sym_vievent?"":", no osViSetEvent",
         hasrescan?", ini rescans":"",
         inifile_osmode()!=OSMODE_AUTO?", set by osmode":"");
+    init.visize=0;
     if(!st.lleos) return;
 
     st.memiosp=1; // SP always through its registers
@@ -1535,6 +1564,12 @@ void lle_decide(int important,int importanttotal,int hasrescan)
     st.mmu[15].d=0x00000B22;  // PRId
     st.mmu[16].d=0x7006E463;  // Config (n64-systemtest StartupTest)
     st.mmu[6].d =0;           // Wired
+    // libultra's osContInit sleeps until osGetTime is 0.5 s. With Count 0
+    // here Indiana Jones got to its save check first: it stops the
+    // controller thread, writes a blank EEPROM and waits on
+    // __osEepromTimerQ, which the rest of osContInit creates
+    lle.countbase=COUNT_BOOT;
+    lle.lastcount=COUNT_BOOT;
     lle.countref=st.cputime;
     lle.dpclockref=st.cputime;
     RMI[1]=0x02020102;        // MI_VERSION

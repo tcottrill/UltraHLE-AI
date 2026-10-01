@@ -2,9 +2,11 @@
 #include "opdefs.h"
 #include <fenv.h>
 #include <float.h>
+#include <immintrin.h>
 
 // FPU arithmetic runs under the game's FCSR rounding mode (op_fpu): the
-// compiler must not fold or move floating-point code across fesetround
+// compiler must not fold or move floating-point code across the MXCSR
+// accesses (host_setround and friends)
 #pragma fenv_access(on)
 
 #define DUMP64 0 // dump 64 bit arithmetic
@@ -27,9 +29,18 @@ static int fpr_fr1(void)
 // of the register number. The storage follows the current mode: FR=1 keeps
 // the upper halves in fpr_hi, FR=0 in the odd st.f entries, and
 // cpu_fpusetfr converts when Status.FR changes.
+//
+// HLE mode doesn't know the game's Status (threads are switched by os.c),
+// so it keeps the registers as they were before this model: 32 separate
+// 32-bit registers f[r], a 64-bit value in f[r] and f[r+1]. That runs code
+// built for either mode. Donkey Kong 64 runs with FR=1 and its animation
+// code keeps singles in odd registers (MTC1 2.0 to $f29, DIV.S $f29,$f29,
+// $f0): in half mode the divide read $f28 and the Kongs' bone matrices
+// came out as NaN, so they were not drawn.
 static qword fpr_get64(int r)
 {
     r&=31;
+    if(!st.lleos) return(((qword)(dword)st.f[(r+1)&31].d<<32)|(dword)st.f[r].d);
     if(fpr_fr1()) return(((qword)fpr_hi[r]<<32)|(dword)st.f[r].d);
     r&=~1;
     return(((qword)(dword)st.f[r+1].d<<32)|(dword)st.f[r].d);
@@ -38,6 +49,12 @@ static qword fpr_get64(int r)
 static void fpr_set64(int r,qword v)
 {
     r&=31;
+    if(!st.lleos)
+    {
+        st.f[r].d=(dword)v;
+        st.f[(r+1)&31].d=(dword)(v>>32);
+        return;
+    }
     if(fpr_fr1())
     {
         st.f[r].d=(dword)v;
@@ -54,6 +71,7 @@ static void fpr_set64(int r,qword v)
 static qword fpr_phys(int r)
 {
     r&=31;
+    if(!st.lleos) return(fpr_get64(r));
     if(fpr_fr1()) return(((qword)fpr_hi[r]<<32)|(dword)st.f[r].d);
     if(!(r&1)) return(((qword)(dword)st.f[r+1].d<<32)|(dword)st.f[r].d);
     return(((qword)fpr_hi[r]<<32)|fpr_hi[r-1]);
@@ -62,7 +80,8 @@ static qword fpr_phys(int r)
 static void fpr_setphys(int r,qword v)
 {
     r&=31;
-    if(fpr_fr1())      { st.f[r].d=(int)(dword)v; fpr_hi[r]=(dword)(v>>32); }
+    if(!st.lleos)      fpr_set64(r,v);
+    else if(fpr_fr1()) { st.f[r].d=(int)(dword)v; fpr_hi[r]=(dword)(v>>32); }
     else if(!(r&1))    { st.f[r].d=(int)(dword)v; st.f[r+1].d=(int)(dword)(v>>32); }
     else               { fpr_hi[r-1]=(dword)v; fpr_hi[r]=(dword)(v>>32); }
 }
@@ -70,17 +89,22 @@ static void fpr_setphys(int r,qword v)
 // FPU arithmetic works on physical registers in both modes; in FR=0 only
 // fs drops its bit 0 (n64-systemtest "... with odd indices (half mode)":
 // ADD.S $1,$29,$31 reads 28 and 31, writes 1). 32-bit results (S, W)
-// clear the upper half of the register (LWC1/MTC1 don't).
+// clear the upper half of the register (LWC1/MTC1 don't). Not in HLE mode:
+// there the upper half is the next register.
 static int fpu_fs(int r)
 {
-    return(fpr_fr1()?(r&31):(r&30));
+    return((!st.lleos || fpr_fr1())?(r&31):(r&30));
 }
 
 static dword fpu_get32(int r)   { return((dword)fpr_phys(r)); }
 static float fpu_getf(int r)    { dword b=fpu_get32(r); float f; memcpy(&f,&b,4); return(f); }
 static double fpu_getd(int r)   { qword q=fpr_phys(r); double d; memcpy(&d,&q,8); return(d); }
-static void fpu_put32(int r,dword bits) { fpr_setphys(r,bits); }
-static void fpu_putf(int r,float f)     { dword b; memcpy(&b,&f,4); fpr_setphys(r,b); }
+static void fpu_put32(int r,dword bits)
+{
+    if(!st.lleos) st.f[r&31].d=(int)bits;
+    else fpr_setphys(r,bits);
+}
+static void fpu_putf(int r,float f)     { dword b; memcpy(&b,&f,4); fpu_put32(r,b); }
 static void fpu_putd(int r,double d)    { qword q; memcpy(&q,&d,8); fpr_setphys(r,q); }
 
 // Status.FR changes: move the upper halves between the two layouts. The odd
@@ -132,27 +156,6 @@ void cpu_fpusetfr(int oldfr,int newfr)
         imm[0]=OP_IMM(opcode); \
         rt=imm;
 
-// HLE only: UltraHLE's OS routines write only the low words of registers,
-// so the first 64-bit operation after a return rebuilds the argument
-// registers' high words. LLE registers are always real 64-bit values, and
-// this would destroy them (a0=0x100000000 became 0).
-static void op_64bitexpand(void)
-{
-    if(!st.expanded64bit && !st.lleos)
-    {
-        if(DUMP64)
-        {
-            print("expandargs\n");
-        }
-        // expand input argument regs
-        if(A0.d2[0]&0x80000000) A0.d2[1]=-1; else A0.d2[1]=0;
-        if(A1.d2[0]&0x80000000) A1.d2[1]=-1; else A1.d2[1]=0;
-        if(A2.d2[0]&0x80000000) A2.d2[1]=-1; else A2.d2[1]=0;
-        if(A3.d2[0]&0x80000000) A3.d2[1]=-1; else A3.d2[1]=0;
-    }
-    st.expanded64bit=1;
-}
-
 static void mult64to128(uint64_t op1, uint64_t op2, uint64_t* hi, uint64_t* lo)
 {
     uint64_t u1 = (op1 & 0xffffffff);
@@ -186,7 +189,6 @@ static void mult64to128_signed(int64_t op1, int64_t op2, uint64_t* hi, uint64_t*
 static void op_dmult(int reg1, int reg2)
 {
     qreg a, b;
-    op_64bitexpand();
     a = st.g[reg1];
     b = st.g[reg2];
     mult64to128_signed((int64_t)a.q, (int64_t)b.q, &st.mhi.q, &st.mlo.q);
@@ -203,7 +205,6 @@ static void op_dmult(int reg1, int reg2)
 static void op_dmultu(int reg1,int reg2)
 {
     qreg a,b;
-    op_64bitexpand();
     a=st.g[reg1];
     b=st.g[reg2];
     mult64to128((uint64_t)a.q, (uint64_t)b.q, &st.mhi.q, &st.mlo.q);
@@ -220,7 +221,6 @@ static void op_dmultu(int reg1,int reg2)
 static void op_ddivu(int reg1,int reg2)
 {
     qreg a,b;
-    op_64bitexpand();
     a=st.g[reg1];
     b=st.g[reg2];
     if(!b.q)
@@ -246,7 +246,6 @@ static void op_ddivu(int reg1,int reg2)
 static void op_ddiv(int reg1,int reg2)
 {
     qreg a,b;
-    op_64bitexpand();
     a=st.g[reg1];
     b=st.g[reg2];
     if(!b.q)
@@ -293,7 +292,6 @@ void op_shift64(dword opcode,int type,int amount)
         d=st.g[OP_RD(opcode)].d2;
     }
 
-    op_64bitexpand();
     t[0]=s[0];
     t[1]=s[1];
     switch(type)
@@ -336,7 +334,6 @@ void op_shift64(dword opcode,int type,int amount)
 
 void addi64(dword *d,dword *a,dword *b)
 {
-    op_64bitexpand();
     {
         uint64_t x=(((uint64_t)a[1]<<32)|a[0])+(((uint64_t)b[1]<<32)|b[0]);
         d[0]=(dword)x;
@@ -361,12 +358,15 @@ __inline dword op_memaddr(dword opcode)
     return(a);
 }
 
-// Comparison operands. LLE registers are real 64-bit values; HLE's OS
-// routines write only low words, so HLE compares the sign-extended low word
-// as it always has (the same order for signed and unsigned tests).
+// Comparison operands: the full 64-bit register in both modes. HLE used
+// to compare the sign-extended low word, because its OS routines write only
+// low words (op_patch sign-extends their results now): Donkey Kong 64's
+// wall test branches on the sign of a 64-bit discriminant (dmult/dsub, then
+// bltz), and the low word's sign made far-away edges "touch" the Kong, who
+// could then walk only a few steps.
 static qint gpr_s(int r)
 {
-    return(st.lleos?(qint)st.g[r].q:(qint)(int)st.g[r].d);
+    return((qint)st.g[r].q);
 }
 
 static qword gpr_u(int r)
@@ -641,9 +641,45 @@ static dword op_sizemask(int bytes)
     return((dword)bytes-1);
 }
 
+// LLE fast path for loads and stores: kernel mode, a sign-extended 32-bit
+// address in KSEG0 below the end of RDRAM, aligned. None of the special
+// cases apply there (address errors, TLB, Status.RE, hardware registers, the
+// cart latch, MI repeat, SP memory, PIF RAM, null-page warnings), so the
+// access goes straight to the D-cache. With breakpoints the full path runs.
+// 1 = *ka is the address
+static int op_k0addr(dword opcode,int bytes,dword *ka)
+{
+    dword s=st.mmu[12].d,a;
+    qword a64;
+    if(!st.lleos || st.breakpoints || ((s&0x18) && !(s&6))) return(0);
+    a64=st.g[OP_RS(opcode)].q+(qword)(qint)SIGNEXT16(OP_IMM(opcode));
+    a=(dword)a64;
+    if(a64!=(qword)(qint)(int)a || (a&0xE0000000u)!=0x80000000u ||
+       (a&0x1fffffff)>=(dword)mem.ramsize || (a&op_sizemask(bytes))) return(0);
+    *ka=a;
+    return(1);
+}
+
 static void op_readmem(dword opcode,int bytes)
 {
     int a,x,*d;
+    dword ka;
+    if(op_k0addr(opcode,bytes,&ka))
+    {
+        const int rt=OP_RT(opcode);
+        physnone=0;
+        switch(bytes)
+        {
+        case -1: st.g[rt].q=(qword)(qint)(signed char)cache_read8(ka); return;
+        case  1: st.g[rt].q=cache_read8(ka); return;
+        case -2: st.g[rt].q=(qword)(qint)(short)cache_read16(ka); return;
+        case  2: st.g[rt].q=cache_read16(ka); return;
+        case  4: st.g[rt].q=(qword)(qint)(int)cache_read32(ka); return;
+        case  8: st.g[rt].q=((qword)cache_read32(ka)<<32)|cache_read32(ka+4); return;
+        case 0x14: st.f[rt].d=cache_read32(ka); return; // LWC1
+        case 0x18: fpr_set64(rt,((qword)cache_read32(ka)<<32)|cache_read32(ka+4)); return; // LDC1
+        }
+    }
     a=op_memaddr(opcode);
     if(op_badaddr64(opcode,0,&a,op_sizemask(bytes)) || op_misaligned(a,op_sizemask(bytes),0)) return;
     if(physnone)
@@ -804,7 +840,27 @@ static void op_mirepeat(dword a,int size,qword v,int length)
 static void op_writemem(dword opcode,int bytes)
 {
     int a,*d;
-    dword pair[2];
+    dword pair[2],ka;
+    if(op_k0addr(opcode,bytes,&ka))
+    { // the fast path (op_k0addr)
+        const int rt=OP_RT(opcode);
+        physnone=0;
+        switch(bytes)
+        {
+        case 1: cache_write8(ka,st.g[rt].d); return;
+        case 2: cache_write16(ka,st.g[rt].d); return;
+        case 4: cache_write32(ka,st.g[rt].d); return;
+        case 8: cache_write32(ka,st.g[rt].d2[1]); cache_write32(ka+4,st.g[rt].d2[0]); return;
+        case 0x14: cache_write32(ka,st.f[rt].d); return; // SWC1
+        case 0x18:
+            { // SDC1
+                qword v=fpr_get64(rt);
+                cache_write32(ka,(dword)(v>>32));
+                cache_write32(ka+4,(dword)v);
+            }
+            return;
+        }
+    }
     a=op_memaddr(opcode);
     if(op_badaddr64(opcode,1,&a,op_sizemask(bytes)) || op_misaligned(a,op_sizemask(bytes),1)) return;
     if(physnone) return;
@@ -910,6 +966,15 @@ static void op_writemem(dword opcode,int bytes)
         else if(flash_contains(phys)) flash_hwwrite(phys&~3u);
         else if((phys&~3u)==LLE_ISVIEWER+0x14) lle_isviewer();
     }
+    // HLE OS mode: a game whose osAiSetNextBuffer wasn't found writes AI_LEN
+    // itself. The buffer goes to the HLE AI FIFO as the patched routine's
+    // would; since 385a8dd only buffers the FIFO takes are played, and
+    // Yoshi's Story was silent
+    else if(!st.lleos && ((dword)a&0xC0000000)==0x80000000
+         && ((dword)a&0x1ffffffc)==0x04500004)
+    {
+        slist_nextbuffer((WAI[0]&0x1fffffff)|0x80000000,(int)(WAI[1]&0x3fff8));
+    }
 }
 
 static void op_rwmemrl(dword opcode,int write,int right)
@@ -982,7 +1047,6 @@ static void op_rwmemrl64(dword opcode,int write,int right)
     uint64_t m64,reg;
     dword   *r=st.g[OP_RT(opcode)].d2;
 
-    op_64bitexpand();
     pa=(int)op_memaddr(opcode);
     if(op_badaddr64(opcode,write,&pa,0)) return;
     a=(dword)pa;
@@ -1015,7 +1079,6 @@ static void op_rwmemrl64(dword opcode,int write,int right)
 static void op_sub64(int *d,int *a,int *b)
 {
     uint64_t x,y;
-    op_64bitexpand();
     x=((uint64_t)(dword)a[1]<<32)|(dword)a[0];
     y=((uint64_t)(dword)b[1]<<32)|(dword)b[0];
     x-=y;
@@ -1161,11 +1224,7 @@ static void op_jump(dword opcode,int link,int reg)
     {
         to=st.g[reg].d;
         jumpreg64=st.g[reg].q;
-        if(reg==31)
-        {
-            st.branchtype=BRANCH_RET;
-            st.expanded64bit=0;
-        }
+        if(reg==31) st.branchtype=BRANCH_RET;
     }
 
     if(link)
@@ -1448,8 +1507,37 @@ static int fpu_divzero(void)
     return(0);
 }
 
-// the host rounding mode for FCSR.RM (nearest, zero, up, down)
-static const int fpu_hostrm[4]={FE_TONEAREST,FE_TOWARDZERO,FE_UPWARD,FE_DOWNWARD};
+// The host's floating-point state, through MXCSR: x64 code does all float
+// math in SSE. The CRT's feclearexcept/fetestexcept/fesetround also save and
+// reload the x87 unit, and were most of an FPU operation's time (55 ns for an
+// ADD.S in Hydro Thunder). MXCSR flags: IE 0x01, DE 0x02 (denormal operand,
+// not an FE_ exception), ZE 0x04, OE 0x08, UE 0x10, PE 0x20; rounding control
+// bits 14..13: 0 nearest, 1 down, 2 up, 3 toward zero.
+static void host_clearexc(void)
+{
+    unsigned c=_mm_getcsr();
+    if(c&0x3f) _mm_setcsr(c&~0x3fu);
+}
+
+// the exception flags raised since host_clearexc, as FE_ bits
+static int host_testexc(void)
+{
+    unsigned c=_mm_getcsr();
+    int      e=0;
+    if(c&0x01) e|=FE_INVALID;
+    if(c&0x04) e|=FE_DIVBYZERO;
+    if(c&0x08) e|=FE_OVERFLOW;
+    if(c&0x10) e|=FE_UNDERFLOW;
+    if(c&0x20) e|=FE_INEXACT;
+    return(e);
+}
+
+// FCSR.RM (nearest, zero, up, down) as the host's rounding mode
+static void host_setround(int rm)
+{
+    static const unsigned rc[4]={0x0000,0x6000,0x4000,0x2000};
+    _mm_setcsr((_mm_getcsr()&~0x6000u)|rc[rm&3]);
+}
 
 // round to an integral value: rm 0 = nearest (ties to even), 1 = toward
 // zero, 2 = up, 3 = down. Done explicitly, whatever the host's mode is.
@@ -1489,7 +1577,7 @@ static int fpu_toint(double a,int rm,int bits,qword *out)
 ** LLE FPU arithmetic, transcribed from ares (ares/n64/cpu/interpreter-fpu.cpp
 ** and algorithms.cpp, commit 4cb8d92b) for n64-systemtest cop1:
 ** - singles are computed in single precision on the host; the host's
-**   exception flags (fetestexcept) become FCSR causes and flags
+**   exception flags (host_testexc) become FCSR causes and flags
 ** - MIPS legacy NaNs: mantissa MSB set = signalling. A signalling NaN operand
 **   is an invalid operation; a quiet NaN or denormal operand is an
 **   unimplemented operation (cause E, always traps)
@@ -1532,7 +1620,7 @@ static int fpe_trap(void)
 // after a host operation: 1 = stop (exception taken, or unimplemented)
 static int fpe_host(int cvt)
 {
-    int exc=fetestexcept(FE_DIVBYZERO|FE_INEXACT|FE_UNDERFLOW|FE_OVERFLOW|FE_INVALID);
+    int exc=host_testexc();
     int raise=0;
     if(!exc) return(0);
     if(cvt && (exc&FE_INVALID))
@@ -1699,7 +1787,7 @@ static void op_fpu_lleop(dword opcode,int fmt,int op)
     const int single=(fmt==16);
 
     st.fcr31&=~FCR31_CAUSE;
-    feclearexcept(FE_ALL_EXCEPT);
+    host_clearexc();
 
     if((fmt==16 || fmt==17) && op<=7 && op!=6)
     { // ADD SUB MUL DIV SQRT ABS NEG
@@ -1711,7 +1799,7 @@ static void op_fpu_lleop(dword opcode,int fmt,int op)
                 if(!fpu_in2(fpclassify(a),snanf(a),fpclassify(b),snanf(b))) return;
             }
             else if(!fpu_inf(a)) return;
-            feclearexcept(FE_ALL_EXCEPT);
+            host_clearexc();
             switch(op)
             {
             case 0: r=a+b; break;
@@ -1737,7 +1825,7 @@ static void op_fpu_lleop(dword opcode,int fmt,int op)
                 if(!fpu_in2(fpclassify(a),snand(a),fpclassify(b),snand(b))) return;
             }
             else if(!fpu_ind(a)) return;
-            feclearexcept(FE_ALL_EXCEPT);
+            host_clearexc();
             switch(op)
             {
             case 0: r=a+b; break;
@@ -1793,7 +1881,7 @@ static void op_fpu_lleop(dword opcode,int fmt,int op)
         double rounded;
         qword  v;
         if(!fpu_inconv(in,single?fpclassify(fpu_getf(fs)):fpclassify(in),bits)) return;
-        feclearexcept(FE_ALL_EXCEPT);
+        host_clearexc();
         if(single) rounded=fpu_roundf(fpu_getf(fs),mode);
         else       rounded=fpu_roundd(in,mode);
         // .W: rounding up to 2^31 overflows the host's 32-bit conversion,
@@ -1819,7 +1907,7 @@ static void op_fpu_lleop(dword opcode,int fmt,int op)
         {
             double a=fpu_getd(fs);
             if(!fpu_ind(a)) return;
-            feclearexcept(FE_ALL_EXCEPT);
+            host_clearexc();
             r=(float)a;
         }
         else if(fmt==20)
@@ -1857,7 +1945,7 @@ static void op_fpu_lleop(dword opcode,int fmt,int op)
         {
             float a=fpu_getf(fs);
             if(!fpu_inf(a)) return;
-            feclearexcept(FE_ALL_EXCEPT);
+            host_clearexc();
             r=(double)a;
         }
         else if(fmt==20)
@@ -1896,9 +1984,9 @@ static void op_fpu_lleop(dword opcode,int fmt,int op)
 // in the FCSR rounding mode (the host goes back to nearest afterwards)
 static void op_fpu_lle(dword opcode,int fmt,int op)
 {
-    if(st.fcr31&3) fesetround(fpu_hostrm[st.fcr31&3]);
+    if(st.fcr31&3) host_setround(st.fcr31);
     op_fpu_lleop(opcode,fmt,op);
-    if(st.fcr31&3) fesetround(FE_TONEAREST);
+    if(st.fcr31&3) host_setround(0);
 }
 
 static void op_fpu(dword opcode)
@@ -1997,7 +2085,7 @@ static void op_fpu(dword opcode)
         // zero"). Singles are computed in double and then narrowed, both
         // in this mode, which rounds as a single operation would; the
         // host goes back to nearest below.
-        if(st.fcr31&3) fesetround(fpu_hostrm[st.fcr31&3]);
+        if(st.fcr31&3) host_setround(st.fcr31);
         switch(op)
         {
         case 0: // ADD
@@ -2038,9 +2126,11 @@ static void op_fpu(dword opcode)
             break;
         // convert & move
         case 6: // MOV
-            // MOV.S copies all 64 bits too, like MOV.D (n64-systemtest)
+            // MOV.S copies all 64 bits too, like MOV.D (n64-systemtest); in
+            // HLE mode the upper half is the next register, so 32 there
             storer=0;
-            fpr_setphys(OP_SHAMT(opcode),fpr_phys(fpu_fs(OP_RD(opcode))));
+            if(!st.lleos && fmt==16) fpu_put32(OP_SHAMT(opcode),fpu_get32(OP_RD(opcode)));
+            else fpr_setphys(OP_SHAMT(opcode),fpr_phys(fpu_fs(OP_RD(opcode))));
             break;
         // to integer: ROUND/TRUNC/CEIL/FLOOR have fixed rounding (func&3),
         // CVT.W/CVT.L use the FCSR mode (IDO sets "toward zero" with CTC1
@@ -2110,9 +2200,23 @@ static void op_fpu(dword opcode)
                 fpu_putd(OP_SHAMT(opcode),r);
             }
         }
-        if(st.fcr31&3) fesetround(FE_TONEAREST);
+        if(st.fcr31&3) host_setround(0);
     }
 
+}
+
+// The VR4300's 32-bit operations write all 64 bits of the destination: the
+// result sign-extended (ANDI zero-extends, ORI/XORI keep rs's high word),
+// written by each handler. With only the low word written, a stale high
+// word leaked out through SD: libdragon's Flappy Bird stored "addiu
+// a0,r0,0x82" with the 0xC8 left by an earlier DSLL32, and drew with a
+// sprite index of 200. (Links, SLT/SLTI and loads write all 64 bits too.)
+
+// the 32-bit MULT/DIV results: LO and HI sign-extended to 64 bits
+static void op_mdsext(void)
+{
+    st.mlo.d2[1]=(int)st.mlo.d2[0]>>31;
+    st.mhi.d2[1]=(int)st.mhi.d2[0]>>31;
 }
 
 static void op_main(dword opcode)
@@ -2216,7 +2320,6 @@ static void op_main(dword opcode)
         break;
     case LL: // LL
     case LLD: // LLD
-        if(op==LLD) st.expanded64bit=1;
         op_readmem(opcode,op==LL?4:8);
         if(!lle_jumped)
         {
@@ -2226,7 +2329,6 @@ static void op_main(dword opcode)
         break;
     case LD: // LD
 //        logi("doubleword load at (%08X)\n",st.pc);
-        st.expanded64bit=1;
         op_readmem(opcode,8);
         break;
     //------------------------------stores
@@ -2274,6 +2376,7 @@ static void op_main(dword opcode)
         GETREGSIMM;
         if(op==ADDI && op_overflow32((qint)(int)*rs+(qint)(int)*rt)) break;
         *rd=(int)((dword)*rs+(dword)*rt);
+        rd[1]=*rd>>31;
         break;
     case DADDI: // DADDI
     case DADDIU: // DADDIU
@@ -2294,14 +2397,17 @@ static void op_main(dword opcode)
     case ANDI: // ANDI
         GETREGSIMMUNS;
         *rd=*rs & *rt;
+        rd[1]=0;
         break;
     case ORI: // ORI
         GETREGSIMMUNS;
         *rd=*rs | *rt;
+        rd[1]=rs[1];
         break;
     case XORI: // XORI
         GETREGSIMMUNS;
         *rd=*rs ^ *rt;
+        rd[1]=rs[1];
         break;
     case LUI: // LUI
         GETREGSIMM;
@@ -2311,31 +2417,38 @@ static void op_main(dword opcode)
             if(hw_ismemiorange(*rt<<16)) st.memiodetected=(*rt<<16);
         }
         *rd=*rt << 16;
+        rd[1]=*rd>>31;
         break;
     case 0x40+SLL: // SLL
         GETREGS;
         *rd=*rt << OP_SHAMT(opcode);
+        rd[1]=*rd>>31;
         break;
     case 0x40+SRL: // SRL
         GETREGS;
         *rd=(unsigned)*rt >> OP_SHAMT(opcode);
+        rd[1]=*rd>>31;
         break;
     case 0x40+SRA: // SRA: the VR4300 shifts the whole 64-bit register, keeps
         // the low word (n64-systemtest: 0123456789ABCDEF>>4 = 789ABCDE)
         GETREGS;
         *rd=(int)(dword)(gpr_s(OP_RT(opcode)) >> OP_SHAMT(opcode));
+        rd[1]=*rd>>31;
         break;
     case 0x40+SLLV: // SLLV (the shift amount is rs's low 5 bits)
         GETREGS;
         *rd=(int)((dword)*rt << (*rs&31));
+        rd[1]=*rd>>31;
         break;
     case 0x40+SRLV: // SRLV
         GETREGS;
         *rd=(unsigned)*rt >> (*rs&31);
+        rd[1]=*rd>>31;
         break;
     case 0x40+SRAV: // SRAV: as SRA
         GETREGS;
         *rd=(int)(dword)(gpr_s(OP_RT(opcode)) >> (*rs&31));
+        rd[1]=*rd>>31;
         break;
     case 0x40+DSLLV: // DSLLV
         op_shift64(opcode,0,-1);
@@ -2377,28 +2490,32 @@ static void op_main(dword opcode)
     case 0x40+MULT: // MULT
         if(st.lleos)
         { // rs as 64 bits, rt sign-extended from 35 bits (n64-systemtest
-          // "MULT"); op_highword sign-extends both halves
+          // "MULT"), both halves sign-extended
             qint a=(qint)st.g[OP_RS(opcode)].q;
             qint b=((qint)(st.g[OP_RT(opcode)].q<<29))>>29;
             qword p=(qword)a*(qword)b;
-            st.mlo.d2[0]=(dword)p;
-            st.mhi.d2[0]=(dword)(p>>32);
+            st.mlo.q=sext32((dword)p);
+            st.mhi.q=sext32((dword)(p>>32));
             break;
         }
         GETREGS;
         op_mult(*rs,*rt);
+        op_mdsext();
         break;
     case 0x40+MULTU: // MULTU
         GETREGS;
         op_multu(*rs,*rt);
+        op_mdsext();
         break;
     case 0x40+DIV: // DIV
         GETREGS;
         op_div(*rs,*rt);
+        op_mdsext();
         break;
     case 0x40+DIVU: // DIVU
         GETREGS;
         op_divu(*rs,*rt);
+        op_mdsext();
         break;
     case 0x40+DMULT: // DMULT
         op_dmult(OP_RS(opcode),OP_RT(opcode));
@@ -2417,12 +2534,14 @@ static void op_main(dword opcode)
         GETREGS;
         if(op==0x40+ADD && op_overflow32((qint)(int)*rs+(qint)(int)*rt)) break;
         *rd=(int)((dword)*rs+(dword)*rt);
+        rd[1]=*rd>>31;
         break;
     case 0x40+SUB: // SUB
     case 0x40+SUBU: // SUBU
         GETREGS;
         if(op==0x40+SUB && op_overflow32((qint)(int)*rs-(qint)(int)*rt)) break;
         *rd=(int)((dword)*rs-(dword)*rt);
+        rd[1]=*rd>>31;
         break;
     case 0x40+AND: // AND
         GETREGS;
@@ -2635,57 +2754,46 @@ static void op_main(dword opcode)
     }
 }
 
-// The VR4300's 32-bit operations write all 64 bits of the destination: the
-// result sign-extended (ANDI zero-extends, ORI/XORI keep rs's high word).
-// The ops above only write the low word, and a stale high word then leaked
-// out through SD: libdragon's Flappy Bird stored "addiu a0,r0,0x82" with the
-// 0xC8 left by an earlier DSLL32, and drew with a sprite index of 200.
-static void op_highword(dword opcode)
+// the profile's class of an instruction (timer.h OPC_*, with `sample 1`)
+static int op_class(dword opcode)
 {
-    int   op=OP_OP(opcode),r;
-    dword *g;
-
-    if(op==0)
+    int op=OP_OP(opcode),f=OP_FUNC(opcode);
+    switch(op)
     {
-        switch(OP_FUNC(opcode))
+    case 0: // SPECIAL
+        if(f==JR || f==JALR) return(OPC_BRANCH);
+        if(f==MULT || f==MULTU || f==DIV || f==DIVU) return(OPC_MUL32);
+        if(f==DMULT || f==DMULTU || f==DDIV || f==DDIVU) return(OPC_MUL64);
+        if(f==DSLLV || f==DSRLV || f==DSRAV || (f>=DADD && f<=DSUBU) || f>=DSLL) return(OPC_ALU64);
+        if(f==SYSCALL || f==BREAK || f==SYNC || (f>=TGE && f<=TNE)) return(OPC_OTHER);
+        return(OPC_ALU32);
+    case REGIMM: case J: case JAL: case BEQ: case BNE: case BLEZ: case BGTZ:
+    case BEQL: case BNEL: case BLEZL: case BGTZL:
+        return(OPC_BRANCH);
+    case DADDI: case DADDIU: return(OPC_ALU64);
+    case LB: case LBU: case LH: case LHU: case LW: case LWU: case LWL: case LWR: case LL:
+        return(OPC_LOAD);
+    case LD: case LDL: case LDR: case LLD: return(OPC_LOAD64);
+    case SB: case SH: case SW: case SWL: case SWR: case SC: return(OPC_STORE);
+    case SD: case SDL: case SDR: case SCD: return(OPC_STORE64);
+    case LWC1: case SWC1: case LDC1: case SDC1: return(OPC_FPULS);
+    case COP0: case CACHE: return(OPC_COP0);
+    case COP1:
         {
-        case SLL: case SRL: case SRA: case SLLV: case SRLV: case SRAV:
-        case ADD: case ADDU: case SUB: case SUBU: case SLT: case SLTU:
-        case JALR:
-            r=OP_RD(opcode);
-            break;
-        case MULT: case MULTU: case DIV: case DIVU:
-            st.mlo.d2[1]=(int)st.mlo.d2[0]>>31;
-            st.mhi.d2[1]=(int)st.mhi.d2[0]>>31;
-            return;
-        default:
-            return;
+            int fmt=OP_RS(opcode);
+            if(fmt<8) return(OPC_FPUMOVE);
+            if(fmt==8) return(OPC_BRANCH);
+            if(fmt==16 || fmt==17)
+            {
+                if(f<=4) return(fmt==16?OPC_FPUS:OPC_FPUD);
+                if(f<=7) return(OPC_FPUMOVE); // ABS MOV NEG
+                if(f>=48) return(OPC_FPUCMP);
+            }
+            return(OPC_FPUCVT);
         }
     }
-    else switch(op)
-    {
-    case ADDI: case ADDIU: case SLTI: case SLTIU: case LUI: // LWL/LWR: op_rwmemrl
-        r=OP_RT(opcode);
-        break;
-    case ANDI:
-        if(OP_RT(opcode)) st.g[OP_RT(opcode)].d2[1]=0;
-        return;
-    case ORI: case XORI:
-        if(OP_RT(opcode)) st.g[OP_RT(opcode)].d2[1]=st.g[OP_RS(opcode)].d2[1];
-        return;
-    case JAL:
-        r=31;
-        break;
-    case 1: // REGIMM: the linking branches
-        if(OP_RT(opcode)<0x10 || OP_RT(opcode)>0x13) return;
-        r=31;
-        break;
-    default:
-        return;
-    }
-    if(!r) return;
-    g=st.g[r].d2;
-    g[1]=(int)g[0]>>31;
+    if(op>=ADDI && op<=LUI) return(OPC_ALU32);
+    return(OPC_OTHER);
 }
 
 // LLE: the ares pipeline (see lle_pcnext). st.branchdelay is 1 while the
@@ -2697,12 +2805,18 @@ static void c_execop_lle(dword opcode)
     const int   inslot=(bd0==1);
 
     icount++;
+    if(prof_opon)
+    {
+        int c=op_class(opcode);
+        prof_opclass=c;
+        prof_opcount[c]++;
+    }
     if(inslot) lle_next64=lle_bt64?(((qword)lle_bthi<<32)|bt0):sext32(bt0);
     else       lle_next64=cpu_pc64get()+4;
     lle_pcnext=(dword)lle_next64;
     lle_br=0;
     op_main(opcode);
-    if(!lle_jumped) op_highword(opcode);
+    if(prof_opon) prof_opclass=OPC_PIPE;
     st.g[0].q=0;
     if(lle_jumped)
     { // exception entry or ERET already set the PC
@@ -2716,7 +2830,9 @@ static void c_execop_lle(dword opcode)
             hw_memio();
             st.memiodetected=0;
         }
-        cpu_notify_branch(bt0,st.branchtype);
+        // the debugger's hook only has work with breakpoints or a trace
+        // (callnest only indents the trace); every taken branch was 1.8%
+        if(st.breakpoints || st.dumptrace) cpu_notify_branch(bt0,st.branchtype);
     }
     switch(lle_br)
     {
@@ -2759,9 +2875,37 @@ void c_execop(dword opcode)
         return;
     }
     icount++;
+#ifdef DK64_DIAGNOSTICS
+    { // DK64_HOOK=<pc>: log the arguments at entry and v0 + the two s16 outputs at return
+        static dword hookpc=~0u,hookra,hookp1,hookp2; static int hookdepth;
+        if(hookpc==~0u) { const char *e=getenv("DK64_HOOK"); hookpc=e?strtoul(e,NULL,16):0; }
+        if(hookpc && st.pc==hookpc && !hookdepth)
+        {
+            dword sp=st.g[29].d,s0=st.g[16].d;
+            hookra=st.g[31].d; hookp1=mem_read32(sp+0x10); hookp2=mem_read32(sp+0x14); hookdepth=1;
+            print("dkhook: in  v0 %08X v1 %08X a0 %08X a1 %08X a2 %08X a3 %08X t0 %08X t1 %08X t3-6 %08X %08X %08X %08X s0 %08X p1 %08X->%04X p2 %08X->%04X vi %i\n",
+                  st.g[2].d,st.g[3].d,st.g[4].d,st.g[5].d,st.g[6].d,st.g[7].d,st.g[8].d,st.g[9].d,
+                  st.g[11].d,st.g[12].d,st.g[13].d,st.g[14].d,s0,
+                  hookp1,mem_read16(hookp1),hookp2,mem_read16(hookp2),st.retraces);
+            if(getenv("DK64_HOOKREC"))
+            { // the wall record at s0: four s64 plane terms, a float length, the s16 vertices
+                dword rec[10]; int i; float len;
+                for(i=0;i<10;i++) rec[i]=mem_read32(s0+i*4);
+                memcpy(&len,&rec[8],4);
+                print("dkhook: rec %08X%08X %08X%08X %08X%08X %08X%08X len %g y %04X..%04X\n",
+                      rec[0],rec[1],rec[2],rec[3],rec[4],rec[5],rec[6],rec[7],len,mem_read16(s0+0x24),mem_read16(s0+0x26));
+            }
+        }
+        else if(hookdepth && st.pc==hookra)
+        {
+            hookdepth=0;
+            print("dkhook: out v0 %08X t7 %08X s1 %08X%08X s2 %08X%08X f0 %08X %08X p1 %04X p2 %04X\n",
+                  st.g[2].d,st.g[15].d,st.g[17].d2[1],st.g[17].d2[0],st.g[18].d2[1],st.g[18].d2[0],
+                  st.f[1].d,st.f[0].d,mem_read16(hookp1),mem_read16(hookp2));
+        }
+    }
+#endif
     op_main(opcode);
-
-    if(!lle_jumped) op_highword(opcode);
 
     // $zero: the handlers write their destination unconditionally (a load
     // still reads, so its side effects and faults happen), and the result
@@ -2805,6 +2949,33 @@ void c_exec(void)
 {
     while(st.bailout>0)
     {
+        if(prof_opon) prof_opclass=OPC_FETCH;
+        // LLE, kernel mode, an aligned KSEG0 PC: no TLB, no mode or RE
+        // checks apply, so an I-cache hit is the whole fetch
+        if(st.lleos && !cpu_pc64 && (st.pc&0xE0000003u)==0x80000000u &&
+           ((st.mmu[12].d&6) || !(st.mmu[12].d&0x18)))
+        {
+            dword op;
+            if(cache_fetchk0(st.pc,&op))
+            {
+                c_execop_lle(op);
+                st.bailout--;
+                if(st.breakpoints || st.dumpops) cpu_notify_pc(st.pc);
+                continue;
+            }
+        }
+        // LLE, the PC still in the line of the last cached fetch (aligned:
+        // bits 1..0 are in the compare) with Status unchanged: the mode,
+        // TLB and alignment checks passed for this line then, so the word
+        // comes straight from it
+        if((st.pc&~0x1Cu)==fetch_base && fetch_gen==lle_tlbgen &&
+           st.mmu[12].d==fetch_status && !cpu_pc64 && st.lleos)
+        {
+            c_execop_lle(fetch_words[(st.pc>>2)&7]);
+            st.bailout--;
+            if(st.breakpoints || st.dumpops) cpu_notify_pc(st.pc);
+            continue;
+        }
         if(cpu_pc64)
         { // a 64-bit PC (xkseg, xkphys...): the data access checks and TLB
             int pa=(int)st.pc;
@@ -2826,8 +2997,16 @@ void c_exec(void)
             st.bailout--;
             continue;
         }
-        c_execop(st.lleos?cache_fetch(cpu_re()?st.pc^4:st.pc):mem_readop(st.pc)); // Status.RE: ^4 (cpu_re)
+        if(st.lleos && cpu_re())
+        { // Status.RE: ^4; the fast path above reads words unswapped
+            dword op=cache_fetch(st.pc^4);
+            fetch_base=1;
+            c_execop(op);
+        }
+        else c_execop(st.lleos?cache_fetch(st.pc):mem_readop(st.pc));
         st.bailout--;
-        cpu_notify_pc(st.pc);
+        // the debugger's hook only when it has something to do: the call
+        // for every instruction was 4% of the host's time
+        if(st.breakpoints || st.dumpops) cpu_notify_pc(st.pc);
     }
 }

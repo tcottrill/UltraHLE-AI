@@ -99,6 +99,9 @@
     <ClInclude Include="..\src\disasm.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="..\src\bootlog.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="..\src\log.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -292,6 +295,9 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="..\src\loadsave.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\bootlog.c">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="..\src\log.c">

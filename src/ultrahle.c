@@ -5,20 +5,18 @@
 
 #include "ultrahle.h"
 #include "xgl/xgl.h"
+#include "bootlog.h"
 #include <stdio.h>
 #include <signal.h>
 #include <crtdbg.h>
 #include <dbghelp.h>
 #pragma comment(lib,"dbghelp.lib")
 
-   // crash.log next to the exe, opened for writing
+   // crash.log next to startup.log (exe folder, or %TEMP%\UltraHLE\)
    static FILE *crashlog(void)
    {
-       char path[MAX_PATH],*p;
-       GetModuleFileNameA(NULL,path,sizeof(path));
-       p=strrchr(path,'\\');
-       strcpy(p?p+1:path,"crash.log");
-       return(fopen(path,"w"));
+       char path[MAX_PATH];
+       return(fopen(bootlog_path(path,"crash.log"),"w"));
    }
 
    // symbolized call stack from context cr (needs the .pdb for names)
@@ -74,7 +72,9 @@
    // to crash.log.
    static LONG WINAPI crashhandler(EXCEPTION_POINTERS *ep)
    {
-       FILE *f=crashlog();
+       FILE *f;
+       bootlog_crash(ep);
+       f=crashlog();
        if(!f) return EXCEPTION_CONTINUE_SEARCH;
        fprintf(f,"exception %08lX at %p (n64 pc %08X)\n",
            ep->ExceptionRecord->ExceptionCode,
@@ -87,6 +87,17 @@
            mem.lookupr[st.pc>>12],mem.lookupw[st.pc>>12]);
        crashstack(f,ep->ContextRecord);
        fclose(f);
+#ifndef _DEBUG
+       // release: say where the logs are (debug runs unattended, no dialog)
+       {
+           char path[MAX_PATH],msg[MAX_PATH+160];
+           bootlog_path(path,"");
+           sprintf(msg,"UltraHLE crashed (exception %08lX).\n\n"
+                   "Please send startup.log, crash.log and ultra.dmp from:\n%s",
+                   ep->ExceptionRecord->ExceptionCode,path);
+           MessageBoxA(NULL,msg,"UltraHLE",MB_OK|MB_ICONERROR);
+       }
+#endif
        return EXCEPTION_CONTINUE_SEARCH;
    }
 
@@ -97,7 +108,9 @@
    static void crashreport(const char *what)
    {
        CONTEXT c;
-       FILE *f=crashlog();
+       FILE *f;
+       bootlog("CRASH: %s",what);
+       f=crashlog();
        if(!f) return;
        RtlCaptureContext(&c);
        fprintf(f,"%s (n64 pc %08X)\n",what,st.pc);
@@ -126,7 +139,11 @@
 
    DWORD WINAPI emuthread(LPVOID value)
    {
+       ULONG guarantee=64*1024;          // room for crashhandler on stack overflow
+       SetThreadStackGuarantee(&guarantee);
+       bootlog("emulator thread started");
        main_thread();
+       bootlog("emulator thread finished");
        // exit main program too if debugui is exited
        SendMessage(hwndMain,WM_CLOSE,0,0);
        // end thread
@@ -153,11 +170,17 @@
 #ifdef _DEBUG
       _CrtSetReportHook(crtreporthook);
 #endif
+      {
+         ULONG guarantee=64*1024;       // room for crashhandler on stack overflow
+         SetThreadStackGuarantee(&guarantee);
+      }
+      bootlog_begin();
 
 	  // ST: main_startup reads program parameters and sets up paths.
       // This may show a message box with command line help. MUST be
       // called before main window is created, since this sets up
       // paths, that are used by listview. Also opens console window.
+      bootlog("main_startup");
       main_startup();
 
       // Define the Primary Windows Class
@@ -177,14 +200,19 @@
 
       // Register the Window Class
 
+      bootlog("RegisterClassEx");
       if( !RegisterClassEx( &wclex ) )
+      {
+         bootlog("RegisterClassEx failed, error %lu", GetLastError());
          return( 0 );
+      }
 
       // Create the Main Application Window
 
       wsprintf( szBuffer, "%s - %s v%i.%i.%i",
                 APPNAME, TITLE, MAJORREV, MINORREV, PATCHLVL );
 
+      bootlog("CreateWindow (main)");
       hwnd = CreateWindow( APPNAME,
                            szBuffer,
                            WS_OVERLAPPEDWINDOW,
@@ -193,9 +221,12 @@
                            NULL,
                            hInst,
                            NULL );
+      if( !hwnd )
+         bootlog("CreateWindow failed, error %lu", GetLastError());
 
       // Initialise the Common Controls Library (Mainly for Open File Dialog)
 
+      bootlog("InitCommonControls");
       InitCommonControls();
 
       // Load the Accelerator Key Table
@@ -203,23 +234,31 @@
       hAccel = LoadAccelerators( hInst, MAKEINTRESOURCE( IDR_ACCELERATOR1 ) );
 
       // Display and Update the Application Window
-      
+
+      bootlog("ShowWindow");
       ShowWindow( hwnd, nWinMode );
       UpdateWindow( hwnd );
 
       // xgl: OpenGL game picture window (hidden until a game draws)
+      bootlog("xgl_createwindow");
       xgl_createwindow( hInst, hwnd );
+      if( !xgl_window() )
+         bootlog("xgl_createwindow failed, error %lu", GetLastError());
 
       // ST: main_thread is the main emulator thread and will run in
       // the background. By default it loads an empty 'dummy' cart
       // and does nothing. Use main_command() to communicate with it
       {
           DWORD mainthreadid;
+          bootlog("CreateThread (emulator)");
           mainthread=CreateThread(NULL,0,
                      emuthread,
                      NULL,0,&mainthreadid );
+          if( !mainthread )
+             bootlog("CreateThread failed, error %lu", GetLastError());
       }
-      
+      bootlog("message loop");
+
       // Windows Message Processing Loop
 
       while( GetMessage( &msg, NULL, 0, 0 ) )
@@ -233,6 +272,7 @@
 
       // Exit the Application
 
+      bootlog("message loop ended, exit code %d", (int)msg.wParam);
       return( msg.wParam );
    }
 
@@ -280,8 +320,11 @@
             // Create the ROM List View
 
             SetCursor(LoadCursor(NULL,IDC_WAIT));
+            bootlog("WM_CREATE: CreateListView");
             CreateListView();
+            bootlog("WM_CREATE: UpdateROMList");
 			   UpdateROMList();
+            bootlog("WM_CREATE: done");
             SetCursor(LoadCursor(NULL,IDC_ARROW));
 
             // Default GFX Mode

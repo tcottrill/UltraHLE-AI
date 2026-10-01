@@ -302,7 +302,9 @@ static void pif_challenge(void)
         chl[i*2]  =(pif_get(0x30+i)>>4)&15;
         chl[i*2+1]= pif_get(0x30+i)    &15;
     }
-    cic_6105(chl,rsp,28);
+    // all 30 nibbles (Mupen64Plus CHL_LEN-2): with 28 the answer's last
+    // byte was whatever the stack held, and Banjo-Tooie's check failed
+    cic_6105(chl,rsp,30);
     pif_set(0x2e,0);
     pif_set(0x2f,0);
     for(i=0;i<15;i++) pif_set(0x30+i,(byte)((rsp[i*2]<<4)+rsp[i*2+1]));

@@ -197,7 +197,7 @@ void cpu_init(void)
 
     st.nextswitch=0x40000000;
 
-    RA.d=0x3ff0000; // return address os segment
+    RA.q=0x3ff0000; // return address os segment
 
     mem.groupnum=0;
     a_clearcodecache();
@@ -631,6 +631,7 @@ void cpu_exec(qword ops0,int fast)
                 prof_begin(PROF_BURST);
                 lle_burststart(num);
                 c_exec();
+                prof_opclass=OPC_OUTSIDE; // RSP, interrupts, waits: not an instruction
                 prof_end(PROF_BURST);
                 // a burst cut short (lle_checksoon) counts what ran, not the
                 // whole length: Count raced ahead of the VI, and libdragon's

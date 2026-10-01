@@ -241,6 +241,7 @@ static void savestate(char *name)
         cpu_save(f1);
         os_save(f1);
         lle_save(f1);
+        hw_save(f1);
         fclose(f1);
         print("State saved to %s\n",name);
     }
@@ -274,7 +275,9 @@ static void loadstate(char *name)
             if(!st2.exception) cpu_load(f1);
             if(!st2.exception) os_load(f1);
             if(!st2.exception) lle_load(f1);
+            if(!st2.exception) hw_load(f1);
             cache_reset(); // the caches aren't in the state (saved clean)
+            sync_clockload(); // the game's clock goes on from the state's time
             // LLE games run their own libultra: no os-call patches (as in boot).
             // Not where an overlay has since replaced the matched code.
             if(!st2.exception && !st.lleos) sym_reapplypatches();
@@ -944,7 +947,9 @@ static void cmd_autopad(std::vector<std::string>& args)
     pad_autoperiod = atoi(param(1, args));
     p = param(2, args); // param() reuses one buffer: read after the period
     pad_automask = *p ? (int)strtoul(p, NULL, 16) : 0x0080;
-    print("autopad: buttons %04X every %i retraces\n", pad_automask, pad_autoperiod);
+    pad_autostickx = atoi(param(3, args));
+    pad_autosticky = atoi(param(4, args));
+    print("autopad: buttons %04X every %i retraces, stick %i,%i\n", pad_automask, pad_autoperiod, pad_autostickx, pad_autosticky);
 }
 
 // combiner 0|1: the old pattern compiler or the N64 combiner in the shader
@@ -1242,6 +1247,7 @@ static void cmd_savemem(std::vector<std::string>& args)
         FILE* f1;
         print("Saving %08X..%08X to %s\n",
             base, base + cnt, file);
+        if(st.lleos) cache_flushall(); // RAM gets the dirty D-cache lines
         f1 = fopen(file, "wb");
         if (f1)
         {
@@ -1311,6 +1317,36 @@ static void cmd_osmode(std::vector<std::string>& args)
     else if (m >= 0) inifile_forceosmode(m);
     else { print("usage: osmode auto|lle|hle|ini\n"); return; }
     print("OS mode: %s (from the next rom load)\n", p);
+}
+
+// sample 0|1: the sampling profiler (timer.c); LLE prints the functions the
+// host's time went to with every perf: line
+static void cmd_sample(std::vector<std::string>& args)
+{
+    int on = atoi(param(1, args));
+    prof_sample(on);
+    print("sampling profiler: %s\n", on ? "on" : "off");
+}
+
+// countperop N: ultra.ini's countperop= for the loaded rom, for a test run
+static void cmd_countperop(std::vector<std::string>& args)
+{
+    cart.countperop = atoi(param(1, args));
+    print("countperop: %i\n", cart.countperop);
+}
+
+// gfxtime N: HLE gfx tasks report done N ms after they start, as the ini's gfxtime=
+static void cmd_gfxtime(std::vector<std::string>& args)
+{
+    cart.gfxtime = atoi(param(1, args));
+    print("gfxtime: %i ms\n", cart.gfxtime);
+}
+
+// rspgfx 0|1: LLE gfx tasks on the RSP interpreter (raw RDP), as the ini's rspgfx=
+static void cmd_rspgfx(std::vector<std::string>& args)
+{
+    cart.rspgfx = atoi(param(1, args));
+    print("rspgfx: %i\n", cart.rspgfx);
 }
 
 static void cmd_clearosinfo(std::vector<std::string>& args)
@@ -1465,6 +1501,10 @@ void cmd_init()
     cmds["osinfo"] = cmd_osinfo;
     cmds["legacypatches"] = cmd_legacypatches;
     cmds["osmode"] = cmd_osmode;
+    cmds["sample"] = cmd_sample;
+    cmds["countperop"] = cmd_countperop;
+    cmds["rspgfx"] = cmd_rspgfx;
+    cmds["gfxtime"] = cmd_gfxtime;
     cmds["clearosinfo"] = cmd_clearosinfo;
     cmds["emptyq"] = cmd_emptyq;
     cmds["event"] = cmd_event;

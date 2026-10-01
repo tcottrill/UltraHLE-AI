@@ -1,8 +1,10 @@
 #include "ultra.h"
+#include "bootlog.h"
 
 // Console text is always also written to ultra.log next to the exe (flushed
 // per message, so the last lines survive a crash), so errors can be read
-// without copying them out of the console window.
+// without copying them out of the console window. Falls back to the
+// startup.log folder (%TEMP%\UltraHLE\) when the exe folder is read-only.
 static FILE *openlog(void)
 {
     static FILE *logfile;
@@ -14,6 +16,8 @@ static FILE *openlog(void)
         strcpy(name,init.rootpath);
         strcat(name,"ultra.log");
         logfile=fopen(name,"wt");
+        if(!logfile) logfile=fopen(bootlog_path(name,"ultra.log"),"wt");
+        if(!logfile) bootlog("ultra.log could not be opened");
     }
     return(logfile);
 }
@@ -82,7 +86,9 @@ void print(const char *txt,...) // generic
         return;
     }
 
-    vsprintf(buf,txt,argp);
+    // bounded: a long startup command line overran the buffer and the log
+    // file pointer after it (crash in fputs)
+    vsnprintf(buf,sizeof(buf),txt,argp);
     printtxt(buf);
 }
 

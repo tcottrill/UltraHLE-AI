@@ -286,6 +286,15 @@ void xgl_state_apply(void)
     // as Glide's GR_CMP_ALWAYS did.
     glEnable(GL_DEPTH_TEST);
     glDepthFunc(depthfunc(xg.depthtest));
+    // decal/translucent z modes (x_zdecal > 1): the w path moves depth
+    // nearer by the factor; screen depth (a_zs, the RDP's z/w) gets the
+    // same nudge from a polygon offset
+    if(xg.zdecal>1.0f)
+    {
+        glEnable(GL_POLYGON_OFFSET_FILL);
+        glPolygonOffset(-1.0f,-2.0f);
+    }
+    else glDisable(GL_POLYGON_OFFSET_FILL);
     glDepthMask(xg.depthmask?GL_TRUE:GL_FALSE);
     // alpha is never written: the FBO has no alpha buffer to draw (xgl_fbo.c)
     glColorMask(xg.colormask?GL_TRUE:GL_FALSE,xg.colormask?GL_TRUE:GL_FALSE,
@@ -343,7 +352,11 @@ void xgl_state_apply(void)
     glBindTexture(GL_TEXTURE_2D,xgl_tex_glname(xg.text2));
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D,xgl_tex_glname(xg.text1));
-    glBindSampler(0,xg.rectclamp?rectsampler(xg.rectclamp,xgl_tex_nearest(xg.text1)):0);
-    glBindSampler(1,xg.rectclamp?rectsampler(xg.rectclamp,xgl_tex_nearest(xg.text2)):0);
+    // the axis it doesn't clamp keeps the texture's wrap: a rectangle inside
+    // its tile across but taller than it got GL_REPEAT down a clamped tile
+    // (Indiana Jones' title logo, 16x29 strips in 80-row rectangles, showed
+    // two or three times)
+    glBindSampler(0,xg.rectclamp?rectsampler(xg.rectclamp|xgl_tex_clamp(xg.text1),xgl_tex_nearest(xg.text1)):0);
+    glBindSampler(1,xg.rectclamp?rectsampler(xg.rectclamp|xgl_tex_clamp(xg.text2),xgl_tex_nearest(xg.text2)):0);
     xgl_stats.chg_mode++;
 }

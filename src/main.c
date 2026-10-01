@@ -1,10 +1,11 @@
 #include "stdsdk.h" // includes ultra.h
 #include "listview.h" // includes ultra.h
+#include "bootlog.h"
 extern HWND hwndMain;
 
 // startup settings
 char  startcmd[1024];
-char  startrom[256];
+char  startrom[MAXFILE];
 
 static HANDLE emuthreadhandle;
 
@@ -346,9 +347,32 @@ void fixpath(char *path,int striplastname)
     p[1]=0;
 }
 
+// Next command line argument into out (size bytes), Windows style: spaces
+// inside "..." belong to the argument and the quotes are removed, so
+// "C:\Program Files\UltraHLE\UltraHLE64.exe" is one argument. Returns 0 at
+// the end of the line.
+static int nextarg(char **cmd,char *out,int size)
+{
+    char *s=*cmd;
+    int   n=0,quoted=0;
+
+    while(*s && *s<=32) s++;
+    if(!*s) { *cmd=s; return(0); }
+    while(*s && (quoted || *s>32))
+    {
+        if(*s=='"') quoted=!quoted;
+        else if(n<size-1) out[n++]=*s;
+        s++;
+    }
+    out[n]=0;
+    *cmd=s;
+    return(1);
+}
+
 void main_startup(void)
 {
-    char *cmd,*p;
+    char *cmd;
+    char  arg[MAXFILE];
     int   showhelp=0;
     int   romname=0;
     int   a;
@@ -362,102 +386,66 @@ void main_startup(void)
     init.gfxwid=640;
     init.gfxhig=480;
 
-    if(!RELEASE)
+    // skip name of executable (quoted when its folder has spaces)
+    nextarg(&cmd,arg,sizeof(arg));
+
+    // command line options
+    while(nextarg(&cmd,arg,sizeof(arg)))
     {
-        // skip name of executable
-        while(*cmd && *cmd>32) cmd++;
-
-        // command line options
-        while(*cmd)
+        // check for '-' or '/'
+        if(*arg=='-' || *arg=='/')
         {
-            // skip space
-            while(*cmd && *cmd<=32) cmd++;
-            if(!*cmd) break;
-            // check for '-' or '/'
-            if(*cmd=='-' || *cmd=='/')
+            switch(arg[1])
             {
-                switch(cmd[1])
-                {
-                case 'c':
-                    init.showconsole=1;
-                    break;
-                case 'n':
-                    init.nomemmap=1;
-                    break;
-                case 'v':
-                    init.novoodoo2=1;
-                    break;
-                case 's':
-                    init.shutdownglide=1;
-                    break;
-                case 'r':
-                    a=atoi(cmd+2);
-                    if(a<320 || a>2048) a=640;
-                    init.gfxwid=a;
-                    init.gfxhig=480*a/640;
-                    break;
-                default:
-                    showhelp=1;
-                    break;
-                }
-
-                // skip argument (nonspace)
-                while(*cmd && *cmd>32) cmd++;
-            }
-            else
-            {
-                if(!romname)
-                {
-                    // skip '!' if in filename
-                    if(*cmd=='!') cmd++;
-                    // override romfile name
-                    p=startrom;
-                    romname=1; // name read
-                }
-                else
-                {
-                    // add to startup commands (insert space first to separate args)
-                    p=startcmd+strlen(startcmd);
-                    *p++=' ';
-                }
-                // add param to p
-                while(*cmd && *cmd>32) *p++=*cmd++;
-                *p++=0;
+            case 'c':
+                init.showconsole=1;
+                break;
+            case 'n':
+                init.nomemmap=1;
+                break;
+            case 'v':
+                init.novoodoo2=1;
+                break;
+            case 's':
+                init.shutdownglide=1;
+                break;
+            case 'r':
+                a=atoi(arg+2);
+                if(a<320 || a>2048) a=640;
+                init.gfxwid=a;
+                init.gfxhig=480*a/640;
+                break;
+            default:
+                showhelp=1;
+                break;
             }
         }
-
-        if(showhelp)
+        else if(!romname)
         {
-            help();
-            *startcmd=0;
-            *startrom=0;
+            // override romfile name, skip '!' if in filename
+            strncpy(startrom,*arg=='!'?arg+1:arg,sizeof(startrom)-1);
+            romname=1; // name read
+        }
+        else if(strlen(startcmd)+strlen(arg)+4<sizeof(startcmd))
+        {
+            // add to startup commands (space separates args); an argument
+            // with spaces (a quoted path) gets its quotes back for command()
+            strcat(startcmd," ");
+            if(strchr(arg,' '))
+            {
+                strcat(startcmd,"\"");
+                strcat(startcmd,arg);
+                strcat(startcmd,"\"");
+            }
+            else strcat(startcmd,arg);
         }
     }
-    else
+
+    if(showhelp)
     {
-        // skip name of executable
-        while(*cmd && *cmd>32) cmd++;
-
-        // command line options
-        while(*cmd)
-        {
-            // skip space
-            while(*cmd && *cmd<=32) cmd++;
-            if(!*cmd) break;
-            // check for '-' or '/'
-            if(*cmd=='-' || *cmd=='/')
-            {
-                switch(cmd[1])
-                {
-                case 'b':
-                    init.novoodoo2=1;
-                    break;
-                }
-
-                // skip argument (nonspace)
-                while(*cmd && *cmd>32) cmd++;
-            }
-        }
+        help();
+        *startcmd=0;
+        *startrom=0;
     }
 
     // load default settings from inifile (these could set paths
@@ -471,9 +459,11 @@ void main_thread(void)
 
     emuthreadhandle=GetCurrentThread();
 
+    bootlog("cmd_init");
     cmd_init();
 
     // open console
+    bootlog("view_open");
     view_open();
     view_changed(VIEW_RESIZE);
     flushdisplay();
@@ -486,13 +476,10 @@ print(CYAN"startcmd: %s\n",startcmd);
 print(CYAN"rootpath: %s ",init.rootpath);
 print(CYAN"savepath: %s ",init.savepath);
 print(CYAN"rompath: %s\n",init.rompath);
-#if RELEASE
-    *startcmd=0;
-    *startrom=0;
-#endif
 
     view_status("startup commands");
     // process optional commands on command line
+    bootlog("boot %s",*startrom?startrom:"(empty cart)");
     if(*startrom)
     {
         boot(startrom,init.nomemmap);
@@ -511,6 +498,7 @@ print(CYAN"rompath: %s\n",init.rompath);
     // help texts
     print("\x1\x3""Type 'help' for help or press F5 to start.\n");
     view_status("ready");
+    bootlog_ready();
 
     // main debugui loop
     debugui();

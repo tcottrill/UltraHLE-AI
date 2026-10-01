@@ -158,9 +158,12 @@
 
          hSearch = FindFirstFile( filter , &FileData );
 
+         // The search ends when FindNextFile says so. It used to end on
+         // GetLastError()==ERROR_NO_MORE_FILES, which the search before had
+         // left set: with .z64 files in the folder, no .zip was listed.
          if( hSearch != INVALID_HANDLE_VALUE )
          {
-            while( GetLastError() != ERROR_NO_MORE_FILES )
+            do
             {
                // Open ROM File to get Header Information
 
@@ -175,7 +178,6 @@
                   hFile = INVALID_HANDLE_VALUE;
                   if( romzip_peek( romList.filename, cHeader, 64, &romSize ) )
                   {
-                     FindNextFile( hSearch, &FileData );
                      continue; // not a ROM archive
                   }
                   romList.dwFileSize = romSize;
@@ -290,13 +292,12 @@
 
                // Get Next Available ROM File
 
-               FindNextFile( hSearch, &FileData );
-            }
+            } while( FindNextFile( hSearch, &FileData ) );
+
+            // Close this Search
+
+            FindClose( hSearch );
          }
-
-         // Close this Search
-
-         FindClose( hSearch );
       }
 
       // Set Window Title

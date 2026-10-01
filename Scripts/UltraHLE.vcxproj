@@ -32,6 +32,7 @@
     <ClInclude Include="..\src\inifile.h" />
     <ClInclude Include="..\src\listview.h" />
     <ClInclude Include="..\src\loadsave.h" />
+    <ClInclude Include="..\src\bootlog.h" />
     <ClInclude Include="..\src\log.h" />
     <ClInclude Include="..\src\main.h" />
     <ClInclude Include="..\src\mem.h" />
@@ -122,6 +123,7 @@
     <ClCompile Include="..\src\inifile.c" />
     <ClCompile Include="..\src\listview.c" />
     <ClCompile Include="..\src\loadsave.c" />
+    <ClCompile Include="..\src\bootlog.c" />
     <ClCompile Include="..\src\log.c" />
     <ClCompile Include="..\src\main.c" />
     <ClCompile Include="..\src\mem.c" />

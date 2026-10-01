@@ -331,6 +331,7 @@ typedef struct
     dword     buffmt[3];
     dword     bufbpp[3];
     dword     bufwid[3];
+    int       depthclearwid,depthclearhig;
     // last tlut load
     dword     tlut_base;
     int       tlut_palbase;
@@ -570,6 +571,8 @@ static void setbuffer(int i,dword c0,dword c1)
 {
     dword addr=address(c1);
 
+    if(i==RDP_BUF_Z && addr!=rst.bufbase[i])
+        rst.depthclearwid=rst.depthclearhig=0;
     rst.bufbase[i]=addr;
     rst.buffmt [i]=FIELD(c0,21,3);
     rst.bufbpp [i]=FIELD(c0,19,2);
@@ -660,6 +663,23 @@ static int cbuf_isscreen(dword addr)
     for(j=0;j<8;j++)
     {
         if(j==rst.lastcbufi || rst.myframe-rst.lastcbufframe[j]>3) continue;
+        if((rst.lastcbufs[j]&0x1fffffff)==addr && rst.lastcbufhig[j]>RTT_SMALLH) return(1);
+    }
+    return(0);
+}
+
+// The same for the start of a frame (SETCIMG): however long ago the buffer
+// was drawn in, as long as it is among the last eight. With three screen
+// buffers and libdragon's small buffer set between frames, a buffer comes
+// round again after six.
+static int cbuf_wasscreen(dword addr)
+{
+    int j;
+    addr&=0x1fffffff;
+    if(addr==(rst.frontcbuf&0x1fffffff)) return(1);
+    for(j=0;j<8;j++)
+    {
+        if(j==rst.lastcbufi) continue;
         if((rst.lastcbufs[j]&0x1fffffff)==addr && rst.lastcbufhig[j]>RTT_SMALLH) return(1);
     }
     return(0);
@@ -2088,6 +2108,12 @@ void txt_loaddata(Texture *txt,Tile *t)
 
 //    if(rst.s_txtfilt==0) flags|=X_NOBILIN;
 
+    // vifb=1 draws in the game's own pixels, so its textures are sampled as
+    // the RDP does: a point for copy mode and point sampling. Filtered,
+    // 2048-64's labels had a line above and below them, where a row of
+    // transparent white texels met the opaque ones and half of it showed.
+    if(cart.vifb && (rst.s_cycles==3 || !(rst.s_txtfilt&2))) flags|=X_NOBILIN;
+
     // raw CI indices for an 8-bit color image: filtering between two indices
     // makes a third, unrelated colour (Yoshi's Story backgrounds speckled)
     if(txt->tluttype==TLUT_RAWINDEX) flags|=X_NOBILIN;
@@ -2306,10 +2332,35 @@ void txt_prepare(int tile)
 ** Drawing
 */
 
+// Raw RDP triangles (the game's own microcode made them) in a 2-cycle mode
+// whose first blender cycle mixes the pixel and the fog color by the shade
+// alpha: X_FOGSHADE for FOG*A+PIXEL*(1-A), Nintendo's G_RM_FOG_SHADE_A,
+// X_FOGSHADEINV for PIXEL*A+FOG*(1-A), which tiny3d uses (Kraken64). 0: not
+// such a mode. Display list HLE makes its fog from the vertices' depth.
+static int rawshade; // the primitives come from raw RDP commands
+
+static int rawfog(void)
+{
+    dword o=rst.other1[0];
+    int   p=(o>>30)&3,a=(o>>26)&3,m=(o>>22)&3,b=(o>>18)&3;
+    if(!rawshade || rst.s_cycles!=2 || a!=2 || b!=0) return(0);
+    if(p==3 && m==0) return(X_FOGSHADE);
+    if(p==0 && m==3) return(X_FOGSHADEINV);
+    return(0);
+}
+
 static void setfog(int pass)
 {
     float cr,cg,cb;
     int type;
+
+    type=rawfog();
+    if(type)
+    { // the color can change with every object
+        rst.foglasttype=type;
+        x_fog(type,0,1,rst.colf[C_FOG][0],rst.colf[C_FOG][1],rst.colf[C_FOG][2]);
+        return;
+    }
 
     if(rst.fogenable)
     {
@@ -2898,8 +2949,11 @@ void rdp_fillrect(TexRect *tr)
     viewport(1);
     if(rst.modechange) newmode();
 
-    // LLE mode: size comes from the VI, unless it has no height yet
-    if(rst.firstfillrect && !rst.rtt_on && (!st.lleos || !init.viewporthig))
+    // LLE mode, or HLE after osViSetMode: size comes from the VI, unless it
+    // has no height yet (GoldenEye's 330 line clear against its 328 line VI
+    // mode resized the screen every frame)
+    if(rst.firstfillrect && !rst.rtt_on &&
+       ((!st.lleos && !init.visize) || !init.viewporthig))
     {
         if(tr->x0-tr->x1>250 && tr->y0-tr->y1>150)
         {
@@ -2946,6 +3000,14 @@ void rdp_fillrect(TexRect *tr)
 
     if(rst.bufbase[RDP_BUF_Z]==rst.bufbase[RDP_BUF_C])
     {
+        // Only a full-origin 16-bit depth clear establishes a safe extent.
+        rst.depthclearwid=rst.depthclearhig=0;
+        if(tr->x1==0 && tr->y1==0 && rst.bufbpp[RDP_BUF_C]==2 &&
+           tr->x0==rst.bufwid[RDP_BUF_C] && tr->y0>0 && tr->y0<=1024)
+        {
+            rst.depthclearwid=(int)tr->x0;
+            rst.depthclearhig=(int)tr->y0;
+        }
         // z-buffer clear: clear the depth under the scissor now, not only at
         // frame start. Smash Bros clears it for each intro panel, and the
         // stage's depth hid the character drawn after it.
@@ -5529,6 +5591,15 @@ void change_other(dword x0,dword x1,dword c0,dword c1)
             b1=X_ZERO;
             b2=X_ONE; //X_INVOTHERALPHA;
         }
+        else if((x&0x0333)==0x0312)
+        {
+            // any*0+MEM*1: the picture stays, only coverage is written.
+            // Star Wars Episode I Racer ends its frame with such rectangles
+            // over its text and the screen edges; opaque, they were black
+            // bars over "press start".
+            b1=X_ZERO;
+            b2=X_ONE;
+        }
         else
         {
             b1=X_ONE;
@@ -5667,8 +5738,10 @@ void newmode(void) // setmode
         if(st.dumpgfx) dump_combine(m0,m1);
     }
 
-    // prepare textures
-    if(rst.txtchange)
+    // prepare textures. A mode that samples none leaves the change pending:
+    // Road Rash 64 loads a font, draws its counter box untextured, then the
+    // digits, which kept the font loaded before (glyphs cut to pieces)
+    if(rst.txtchange && COM.texenable)
     {
         if(COM.texenable&2) txt_prepare(1);
         if(COM.texenable&1) txt_prepare(0);
@@ -5800,6 +5873,11 @@ void rdp_segment(int seg,dword base)
 static int rtt_offscreen(void)
 {
     int w=rst.bufwid[RDP_BUF_C],fmt=rst.buffmt[RDP_BUF_C],bpp=rst.bufbpp[RDP_BUF_C];
+    // vifb=1: the game draws in its frame buffer with the CPU as well, so
+    // the screen's own buffer is drawn from RDRAM and back to it too, and
+    // the VI's buffer is what is shown (rdp_showvi). 2048-64 sends the RDP
+    // one clear a frame and draws the rest itself.
+    if(cart.vifb && fmt==0 && (bpp==2 || bpp==3) && w>=8 && w<=1024) return(1);
     if(w==init.viewportwid) return(0);
     if(w==320 || w==640 || w<8 || w>1024) return(0);
     // RGBA 16/32-bit, or 8-bit CI/I: Yoshi's Story builds its 336x256 CI8
@@ -5807,13 +5885,145 @@ static int rtt_offscreen(void)
     return((fmt==0 && (bpp==2 || bpp==3)) || (bpp==1 && (fmt==2 || fmt==4)));
 }
 
+/****************************************************************************
+** vifb=1: the screen's buffer is such a target for every raw command list,
+** up to 34 of them a frame in 2048-64. Copying all of it from RDRAM and
+** back for each took the emulator to 27 VI a second in play. The target
+** keeps its picture between lists, and only rows move: into it those the
+** game's CPU has changed in RDRAM since (a checksum per row), out of it
+** those the list drew in.
+*/
+#define VIFB_ROWS 512
+
+static struct
+{
+    int   valid;          // the target holds addr's picture, as hash has it
+    dword addr;
+    int   w,bpp,rows;
+    dword hash[VIFB_ROWS];
+    int   y0,y1;          // rows drawn in since the last write-back
+} vifb;
+
+static int vifb_bytes(void)
+{
+    return(vifb.bpp==3?4:2);
+}
+
+static dword vifb_rowhash(int y)
+{
+    dword  a=vifb.addr+(dword)(y*vifb.w)*vifb_bytes(),h=2166136261u;
+    dword *p;
+    int    n=vifb.w*vifb_bytes()/4;
+    if(a+(dword)(n*4)+4>(dword)mem.ramsize) return(0);
+    p=(dword *)(mem.ram+(a&~3));
+    while(n--) h=(h^*p++)*16777619u;
+    return(h);
+}
+
+// row y of the buffer in RDRAM as RGBA8
+static void vifb_rowfromram(int y,byte *d)
+{
+    int x;
+    for(x=0;x<vifb.w;x++,d+=4)
+    {
+        dword a=vifb.addr+(dword)(y*vifb.w+x)*vifb_bytes(),c;
+        if(a+4>(dword)mem.ramsize) { d[0]=d[1]=d[2]=d[3]=0; continue; }
+        if(vifb.bpp==3)
+        {
+            c=*(dword *)(mem.ram+a);
+            d[0]=(byte)(c>>24); d[1]=(byte)(c>>16); d[2]=(byte)(c>>8); d[3]=(byte)c;
+        }
+        else
+        {
+            c=*(word *)(mem.ram+(a^2));
+            d[0]=(byte)(((c>>11)&31)*255/31);
+            d[1]=(byte)(((c>> 6)&31)*255/31);
+            d[2]=(byte)(((c>> 1)&31)*255/31);
+            d[3]=(c&1)?255:0;
+        }
+    }
+}
+
+// the rows the CPU has changed go into the target
+static void vifb_fromram(void)
+{
+    byte *row=malloc(vifb.w*4);
+    int   y;
+    if(!row) return;
+    for(y=0;y<vifb.rows;y++)
+    {
+        dword h=vifb_rowhash(y);
+        if(h==vifb.hash[y]) continue;
+        vifb.hash[y]=h;
+        vifb_rowfromram(y,row);
+        x_rtt_writerows(y,1,row);
+    }
+    free(row);
+}
+
+// the rows drawn in go back to RDRAM
+static void vifb_toram(void)
+{
+    int   w=vifb.w,n,x,y;
+    byte *img,*cover,*s,*cv;
+
+    if(vifb.y0>vifb.y1) return;
+    if(vifb.y0<0) vifb.y0=0;
+    if(vifb.y1>=vifb.rows) vifb.y1=vifb.rows-1;
+    n=vifb.y1-vifb.y0+1;
+    if(n<=0) { vifb.y0=VIFB_ROWS; vifb.y1=-1; return; }
+    img=malloc(w*n*4);
+    cover=malloc(w*n);
+    if(img && cover)
+    {
+        x_rtt_readrows(vifb.y0,n,img,cover);
+        for(y=0,s=img,cv=cover;y<n;y++)
+        {
+            for(x=0;x<w;x++,s+=4,cv++)
+            {
+                dword a=vifb.addr+(dword)((vifb.y0+y)*w+x)*vifb_bytes();
+                if(a+4>(dword)mem.ramsize) continue;
+                if(vifb.bpp==3)
+                {
+                    dword al=*cv==2?255:*cv==1?0:(*(dword *)(mem.ram+a)&255);
+                    *(dword *)(mem.ram+a)=((dword)s[0]<<24)|((dword)s[1]<<16)|((dword)s[2]<<8)|al;
+                }
+                else
+                {
+                    word al=*cv==2?1:*cv==1?0:(*(word *)(mem.ram+(a^2))&1);
+                    *(word *)(mem.ram+(a^2))=(word)(((s[0]>>3)<<11)|((s[1]>>3)<<6)|((s[2]>>3)<<1)|al);
+                }
+            }
+            vifb.hash[vifb.y0+y]=vifb_rowhash(vifb.y0+y);
+        }
+    }
+    free(img);
+    free(cover);
+    vifb.y0=VIFB_ROWS;
+    vifb.y1=-1;
+}
+
+// a raw command draws in rows y0..y1 of the buffer
+static void vifb_drawn(int y0,int y1)
+{
+    if(y0<vifb.y0) vifb.y0=y0;
+    if(y1>vifb.y1) vifb.y1=y1;
+}
+
 static void rtt_begin(int rtth)
 {
     int    w=rst.bufwid[RDP_BUF_C],bpp=rst.bufbpp[RDP_BUF_C],x,y;
     dword  addr=rst.bufbase[RDP_BUF_C]&0x1fffffff;
     byte  *img,*d;
+    int    isvifb=cart.vifb && rst.buffmt[RDP_BUF_C]==0 && (bpp==2 || bpp==3) && rtth<=VIFB_ROWS;
 
     flushprims();
+    if(isvifb && vifb.valid && vifb.addr==addr && vifb.w==w && vifb.bpp==bpp && x_rtt_resume(w,rtth))
+    { // the target still has this buffer's picture
+        vifb_fromram();
+        goto opened;
+    }
+    vifb.valid=0;
     img=malloc(w*rtth*4);
     if(!img) return;
     for(y=0,d=img;y<rtth;y++)
@@ -5842,7 +6052,21 @@ static void rtt_begin(int rtth)
         }
     if(!x_rtt_begin(w,rtth,img)) { free(img); return; }
     free(img);
+    if(isvifb)
+    {
+        vifb.valid=1;
+        vifb.addr =addr;
+        vifb.w    =w;
+        vifb.bpp  =bpp;
+        vifb.rows =w*3/4;
+        if(rst.scissorhig>vifb.rows) vifb.rows=rst.scissorhig;
+        if(vifb.rows>rtth) vifb.rows=rtth;
+        vifb.y0   =VIFB_ROWS;
+        vifb.y1   =-1;
+        for(y=0;y<vifb.rows;y++) vifb.hash[y]=vifb_rowhash(y);
+    }
 
+opened:
     rst.rtt_on=1;
     rst.rtt_addr=addr;
     rst.rtt_w=w;
@@ -5870,8 +6094,17 @@ static void rtt_end(void)
     flushprims();
     h=rst.rtt_maxy>0?rst.rtt_maxy:w*3/4;
     if(h>rst.rtt_h) h=rst.rtt_h;
-    img=malloc(w*h*4);
-    cover=malloc(w*h);
+    if(vifb.valid && vifb.addr==rst.rtt_addr)
+    { // vifb=1: the rows drawn in, and the target keeps its picture
+        vifb_toram();
+        img=cover=NULL;
+        h=0;
+    }
+    else
+    {
+        img=malloc(w*h*4);
+        cover=malloc(w*h);
+    }
     if(img && cover)
     {
         // the renderer writes no alpha: the alpha (coverage) bit comes from
@@ -5933,6 +6166,106 @@ static void tmem_loaded(int i,int len,int line)
     rst.tmemline[i]=line;
     for(j=i+1;j<i+len/8 && j<512;j++) rst.tmemlen[j]=0;
     for(j=i;j<i+(len>8?len:8)/8 && j<512;j++) rst.tmemtlut[j]=0;
+}
+
+// RDP_SETTILESIZE, and RDP_LOADTILE for a tile with no size yet (the RDP keeps
+// one set of tile coordinates, which both commands write)
+static void settilesize(dword *cmd)
+{
+    int ti=FIELD(cmd[1],24,3);
+    int xs,ys;
+    Tile *t=rst.tile+ti;
+
+    t->x0full=FIELD(cmd[0],12,12);
+    t->y0full=FIELD(cmd[0],0,12);
+    // An upper-left past the lower-right is negative (the RDP's
+    // s-sl wraps): Conker's eye tile starts at 0xFFE, half a texel
+    // left of 0, and read as 1023.5 its width was -991 and it was
+    // drawn untextured. The shift stays in x0full, the size starts
+    // at texel 0.
+    if(t->x0full>(int)FIELD(cmd[1],12,12))
+    {
+        t->x0full-=4096;
+        cmd[0]&=~(0xfff<<12);
+    }
+    if(t->y0full>(int)FIELD(cmd[1],0,12))
+    {
+        t->y0full-=4096;
+        cmd[0]&=~0xfff;
+    }
+
+    if(t->settilemark)
+    {
+        // already set, this is probably a offset call (x0y0 change);
+        // but a masked tile drawn again at another size repeats and
+        // clamps by that size (Smash's castle roofs draw one texture
+        // as a 64x96 and a 32x160 tile)
+        if(!(t->masks || t->maskt) ||
+           (FIELD(cmd[1],14,10)-FIELD(cmd[0],14,10)==t->x1-t->x0 &&
+            FIELD(cmd[1],2,10) -FIELD(cmd[0],2,10) ==t->y1-t->y0))
+            return;
+    }
+    t->settilemark=1;
+
+    txt_masksize(t,cmd);
+
+    xs=FIELD(cmd[1],14,10)-FIELD(cmd[0],14,10);
+    ys=FIELD(cmd[1],2,10) -FIELD(cmd[0],2,10) ;
+    if(!xs) xs=1;
+    if(!ys) ys=1;
+    if(xs*ys>=16384 && t->tmemrl>0 && t->tmembase<4096)
+    {
+        // tile taller than TMEM (a font strip wider than a load,
+        // e.g. Beetle Adventure Racing): only the rows that fit
+        // in TMEM exist, so clamp the height to those
+        int rows=(4096-t->tmembase)/t->tmemrl;
+        if(rows<1) rows=1;
+        if(ys>=rows)
+        {
+            ys=rows-1;
+            cmd[1]=(cmd[1]&~0xfff)|((FIELD(cmd[0],2,10)+ys)<<2);
+        }
+    }
+    if(xs*ys>=16384)
+    {
+        // can't be right!?
+        // keep the scrolling part, but
+        // ignore new size
+        logd("\n+tile %i settilesize (%i,%i)-(%i,%i) error! ",
+            ti,
+            FIELD(cmd[0],14,10),
+            FIELD(cmd[0],2,10),
+            FIELD(cmd[1],14,10),
+            FIELD(cmd[1],2,10));
+        return;
+    }
+
+    t->x0=FIELD(cmd[0],14,10);
+    t->y0=FIELD(cmd[0],2,10);
+    t->x1=FIELD(cmd[1],14,10);
+    t->y1=FIELD(cmd[1],2,10);
+    // the texel at (ul,ul) is the first one in TMEM, also after a
+    // LOADBLOCK (texture coordinates already subtract x0full/y0full)
+    t->xs=t->x1-t->x0+1;
+    t->ys=t->y1-t->y0+1;
+
+    if(ti!=7)
+    {
+        rst.lastusedtile=ti;
+        t->membase=rst.bufbase[RDP_BUF_TXT];
+        t->memfmt =rst.buffmt[RDP_BUF_TXT];
+        t->membpp =rst.bufbpp[RDP_BUF_TXT];
+        rst.modechange=rst.txtchange=1;
+    }
+    if(st.dumpgfx)
+    {
+        logd("\n+tile %i settilesize (%i,%i)-(%i,%i) sz(%i,%i) base %08X",
+            ti,
+            t->x0,t->y0,
+            t->x1,t->y1,
+            t->xs,t->ys,
+            t->membase);
+    }
 }
 
 int rdp_cmd(dword *cmd)
@@ -6003,9 +6336,15 @@ int rdp_cmd(dword *cmd)
         // of its own, then renders sprite palettes into another buffer in
         // the scene's task, and presenting there showed the background alone
         // and drew the scene over a cleared picture.
+        // A buffer drawn in as a screen counts as well as one the VI has
+        // shown: Kraken64 has three, and frames shown at their successor's
+        // start never enter the VI's list. Once one present had come from
+        // the VI, every frame followed by one of those waited for the VI and
+        // was shown with up to 2900 primitives of the next frame over it
+        // (one frame in three, a heavy flicker that came and went).
         if(rst.presentpending && address(cmd[1])!=rst.pendingcbuf &&
            address(cmd[1])!=rst.bufbase[RDP_BUF_Z] &&
-           (!vi_presents() || vi_hasshown(address(cmd[1]))))
+           (!vi_presents() || vi_hasshown(address(cmd[1])) || cbuf_wasscreen(address(cmd[1]))))
         {
             flushprims();
             rdp_present();
@@ -6166,6 +6505,19 @@ int rdp_cmd(dword *cmd)
             tmem_loaded(i,(y1-y0+1)*rst.tile[ti].tmemrl,rst.tile[ti].tmemrl);
             rst.modechange=rst.txtchange=1;
             rst.lastloadb=0;
+            // The RDP keeps the load's coordinates as the tile's size. A
+            // tile drawn with no SETTILESIZE of its own since its SETTILE
+            // has that size: 2048-64 loads each glyph with tile 0 and draws
+            // it, and with no size its text was untextured rectangles. A
+            // SETTILESIZE after this is still the tile's first.
+            if(!rst.tile[ti].settilemark)
+            {
+                dword c[2];
+                c[0]=cmd[0];
+                c[1]=cmd[1];
+                settilesize(c);
+                rst.tile[ti].settilemark=0;
+            }
         }
         break;
     case 0xf3: // RDP_LOADBLOCK
@@ -6241,102 +6593,7 @@ int rdp_cmd(dword *cmd)
         }
         break;
     case 0xf2: // RDP_SETTILESIZE
-        {
-            int ti=FIELD(cmd[1],24,3);
-            int xs,ys;
-            Tile *t=rst.tile+ti;
-
-            t->x0full=FIELD(cmd[0],12,12);
-            t->y0full=FIELD(cmd[0],0,12);
-            // An upper-left past the lower-right is negative (the RDP's
-            // s-sl wraps): Conker's eye tile starts at 0xFFE, half a texel
-            // left of 0, and read as 1023.5 its width was -991 and it was
-            // drawn untextured. The shift stays in x0full, the size starts
-            // at texel 0.
-            if(t->x0full>(int)FIELD(cmd[1],12,12))
-            {
-                t->x0full-=4096;
-                cmd[0]&=~(0xfff<<12);
-            }
-            if(t->y0full>(int)FIELD(cmd[1],0,12))
-            {
-                t->y0full-=4096;
-                cmd[0]&=~0xfff;
-            }
-
-            if(t->settilemark)
-            {
-                // already set, this is probably a offset call (x0y0 change);
-                // but a masked tile drawn again at another size repeats and
-                // clamps by that size (Smash's castle roofs draw one texture
-                // as a 64x96 and a 32x160 tile)
-                if(!(t->masks || t->maskt) ||
-                   (FIELD(cmd[1],14,10)-FIELD(cmd[0],14,10)==t->x1-t->x0 &&
-                    FIELD(cmd[1],2,10) -FIELD(cmd[0],2,10) ==t->y1-t->y0))
-                    break;
-            }
-            t->settilemark=1;
-
-            txt_masksize(t,cmd);
-
-            xs=FIELD(cmd[1],14,10)-FIELD(cmd[0],14,10);
-            ys=FIELD(cmd[1],2,10) -FIELD(cmd[0],2,10) ;
-            if(!xs) xs=1;
-            if(!ys) ys=1;
-            if(xs*ys>=16384 && t->tmemrl>0 && t->tmembase<4096)
-            {
-                // tile taller than TMEM (a font strip wider than a load,
-                // e.g. Beetle Adventure Racing): only the rows that fit
-                // in TMEM exist, so clamp the height to those
-                int rows=(4096-t->tmembase)/t->tmemrl;
-                if(rows<1) rows=1;
-                if(ys>=rows)
-                {
-                    ys=rows-1;
-                    cmd[1]=(cmd[1]&~0xfff)|((FIELD(cmd[0],2,10)+ys)<<2);
-                }
-            }
-            if(xs*ys>=16384)
-            {
-                // can't be right!?
-                // keep the scrolling part, but
-                // ignore new size
-                logd("\n+tile %i settilesize (%i,%i)-(%i,%i) error! ",
-                    ti,
-                    FIELD(cmd[0],14,10),
-                    FIELD(cmd[0],2,10),
-                    FIELD(cmd[1],14,10),
-                    FIELD(cmd[1],2,10));
-                break;
-            }
-
-            t->x0=FIELD(cmd[0],14,10);
-            t->y0=FIELD(cmd[0],2,10);
-            t->x1=FIELD(cmd[1],14,10);
-            t->y1=FIELD(cmd[1],2,10);
-            // the texel at (ul,ul) is the first one in TMEM, also after a
-            // LOADBLOCK (texture coordinates already subtract x0full/y0full)
-            t->xs=t->x1-t->x0+1;
-            t->ys=t->y1-t->y0+1;
-
-            if(ti!=7)
-            {
-                rst.lastusedtile=ti;
-                t->membase=rst.bufbase[RDP_BUF_TXT];
-                t->memfmt =rst.buffmt[RDP_BUF_TXT];
-                t->membpp =rst.bufbpp[RDP_BUF_TXT];
-                rst.modechange=rst.txtchange=1;
-            }
-            if(st.dumpgfx)
-            {
-                logd("\n+tile %i settilesize (%i,%i)-(%i,%i) sz(%i,%i) base %08X",
-                    ti,
-                    t->x0,t->y0,
-                    t->x1,t->y1,
-                    t->xs,t->ys,
-                    t->membase);
-            }
-        }
+        settilesize(cmd);
         break;
     case 0xf1: // RDP_RDPHALF_RDP
         logd("!skiprdp ");
@@ -6539,6 +6796,7 @@ void rdp_framestart(void)
 {
     int i;
 
+    rawshade=0; // a display list, unless rdp_rawcmd says otherwise
     if(rst.frameopen) return;
     rst.frameopen=1;
 
@@ -6611,6 +6869,35 @@ void rdp_framestart(void)
     rst.tris=0;
 }
 
+#include "depth_readback.h"
+
+static void rdp_depthwrite(void)
+{
+    static float *pixels;
+    static size_t capacity;
+    int w=rst.bufwid[RDP_BUF_C],h;
+    int sw=init.gfxwid,sh=init.gfxhig;
+    dword base=rst.bufbase[RDP_BUF_Z]&0x1fffffff;
+    size_t count;
+    h=depth_target_height(w,rst.depthclearwid,rst.depthclearhig,base,mem.ramsize);
+    rst.depthclearwid=rst.depthclearhig=0;
+    if(!h || sw<=0 || sh<=0 || sw>8192 || sh>8192) return;
+    count=(size_t)sw*sh;
+    if(count>capacity)
+    {
+        float *next=(float *)realloc(pixels,count*sizeof(float));
+        if(!next) return;
+        pixels=next; capacity=count;
+    }
+    if(x_readdepth(pixels,sw,sh)) return;
+    depth_copy((unsigned short *)(mem.ram+base),w,w,h,pixels,sw,sh);
+#ifdef DK64_DIAGNOSTICS
+    { static dword lastbase=0xffffffff;
+      if(base!=lastbase) print("depthwrite: z=%08X size=%ix%i\n",base,w,h);
+      lastbase=base; }
+#endif
+}
+
 void rdp_frameend(void)
 {
     if(!rst.frameopen) return;
@@ -6619,6 +6906,7 @@ void rdp_frameend(void)
     st2.gfxdpsyncpending=1;
     flushprims();
     rtt_end(); // an offscreen buffer still open: write it back
+    if(cart.depthwrite && !cart.vifb) rdp_depthwrite();
     // debuginfo
     if(1)
     {
@@ -6650,7 +6938,11 @@ void rdp_frameend(void)
     // show buffer on screen when the game asks the VI to show it
     // (rdp_viorigin, between tasks like Glide64's swap on VI), so frames
     // drawn as several tasks appear whole
-    if(rst.tris>0)
+    if(cart.vifb)
+    { // the picture is the frame buffer in RDRAM, shown from the VI
+        rst.presentpending=0;
+    }
+    else if(rst.tris>0)
     {
         dword cbuf=rst.bufbase[RDP_BUF_C];
         if(!(rst.presentpending && rst.pendingcbuf==cbuf))
@@ -6828,6 +7120,7 @@ static void rawtri(const dword *w)
         else if(zb)
         {
             double z=((int)zb[0]+(int)zb[2]*dy+(int)zb[1]*dx)/65536.0/32768.0;
+            if(st.dumpgfx) logd(" z%i=%.5f w=%.3f",i,z,cw);
             v->zs=(float)(z<0?0:(z>1?1:z));
         }
         for(c=0;c<4;c++)
@@ -6865,10 +7158,21 @@ void rdp_rawcmd(const dword *w,int words)
 
     if(st.graphicsenable<=0) return;
     if(!rst.frameopen) rdp_framestart();
+    rawshade=1;
 
     // the RDP ignores the top two bits; display lists have them set
     cmd[0]=(w[0]&0x3fffffff)|0xc0000000;
     cmd[1]=w[1];
+    // vifb=1: the buffer went back to RDRAM at the end of the last list
+    // (rdp_rawlistend); drawing goes on from what is there now
+    if(cart.vifb && (op==0x24 || op==0x25 || op==0x36 || (op>=0x08 && op<=0x0f)))
+    {
+        if(!rst.rtt_on && rtt_offscreen()) rtt_begin(RTT_H);
+        // the rows it draws in: rectangles have their corners' y in 10.2,
+        // triangles YH and YL in s11.2
+        if(op>=0x08 && op<=0x0f) vifb_drawn(rawsext(w[1],14)/4-1,rawsext(w[0],14)/4+1);
+        else                     vifb_drawn((int)(w[1]&0xfff)/4-1,(int)(w[0]&0xfff)/4+1);
+    }
     switch(op)
     {
     case 0x08: case 0x09: case 0x0a: case 0x0b:
@@ -6901,9 +7205,37 @@ void rdp_rawcmd(const dword *w,int words)
     }
 }
 
+// The RSP has written RDRAM from first up to end by DMA. Over the z image
+// that is a depth clear: libdragon clears its z-buffer by copying a row of
+// the clear value from DMEM again and again (__rdpq_clear_z_with_rsp), no
+// RDP command says so. The renderer's depth was cleared only by a present,
+// and Kraken64 draws its next frame before the last one is shown: its sky
+// and sea were tested against the last frame's depth and lost.
+void rdp_ramwritten(dword first,dword end)
+{
+    dword z=rst.bufbase[RDP_BUF_Z]&0xffffff;
+    int   w=rst.bufwid[RDP_BUF_C];
+
+    if(!rst.opened || !z || w<8 || w>1024 || softrdp_active()) return;
+    // from its first row on, and half of it at least (w x w*3/4 words)
+    if(first>z+(dword)w*2 || end<z+(dword)(w*(w*3/4))) return;
+    if(first+0x100000<z) return;
+    flushprims();
+    x_clear(0,1,0,0,0);
+    logd("\n+depth cleared (RSP DMA %08X..%08X over the z image %08X)",first,end,z);
+}
+
+// vifb=1, a raw RDP command list has ended: what it drew goes back to RDRAM,
+// where the game's CPU draws next
+void rdp_rawlistend(void)
+{
+    if(cart.vifb && rst.rtt_on) rtt_end();
+}
+
 // Show the framebuffer the VI scans out (origin, width in pixels, bytes per
-// pixel 2 or 4), for pictures drawn in RDRAM by the software RDP
-// (rdp_soft.c). Called per retrace on the emulation thread.
+// pixel 2 or 4), for pictures drawn in RDRAM: by the software RDP
+// (rdp_soft.c), or with vifb=1 by the game's CPU and the renderer's
+// write-back. Called from the retrace on the emulation thread.
 void rdp_showvi(dword origin,int width,int height,int bpp)
 {
     static int   handle,texw,texh;
@@ -6913,6 +7245,7 @@ void rdp_showvi(dword origin,int width,int height,int bpp)
     if(width<=0 || height<=0 || width>1024 || height>1024) return;
     if(!rst.opened) rdp_opendisplay();
     if(!rst.fullscreen) return;
+    if(rst.rtt_on) rtt_end(); // the quad below goes to the window's buffer
     if(width!=texw || height!=texh)
     {
         if(handle>0) x_freetexture(handle);
@@ -7251,6 +7584,11 @@ static void bg_draw(dword base,int fmt,int siz,int pal,int imgw,int imgh,
     else
         x_alphatest(1.0f);
     x_texture(xhandle);
+    // the image's own wrap: the texture rectangles' clamp (x_rectclamp) stays
+    // set after their flush. Yoshi's Story repaints tile columns with
+    // texrects while it scrolls, and the next layers were drawn clamped:
+    // one vanished (its transparent edge), one showed its edge row stretched
+    x_rectclamp(0,0);
     x_vxcolor4(1.0f,1.0f,1.0f,1.0f);
     x_begin(X_QUADS);
     x_vxtex(u0,v0); x_vxpos(frx*oxm+oxa,fry*oym+oya,1.0);

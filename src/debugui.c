@@ -418,7 +418,12 @@ void view_stat(void)
         con_tabto(' ',256);
         yi++;
     }
+}
 
+// main window status bar counters; outside view_redraw so Release builds get them too
+void view_statusbar(void)
+{
+    int i;
     {
         char szBuffer[256]; // added a local szbuffer, multithreading!!
         // GH - Update Status Bar Stats
@@ -812,6 +817,7 @@ void flushdisplay(void)
     }
 
     flushlog();
+    view_statusbar();
     view_changed(VIEW_ALL);
     view_redraw();
 }

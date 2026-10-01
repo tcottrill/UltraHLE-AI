@@ -35,3 +35,12 @@ ISC licence) (2026-09-26):
   EMULATE_STATIC_PC, which su.h defines, so they never took effect; the
   static-PC loop already resumes at the branch target after a BREAK in a
   delay slot, because it runs slots inline.
+
+Performance report (2026-09-29):
+- su.c run_task: cxd4_ran counts the instructions of budgeted runs, read
+  through rsp_cxd4_ran() for the "perf: ... rsp N M" line in ultra.log
+
+Depth clears by SP DMA (2026-09-29):
+- su.c SP_DMA_WRITE: cxd4_dmatoram, when set, is told the RDRAM range the
+  DMA has written. libdragon clears its z-buffer that way, and the renderer
+  clears its depth with it (rdp_ramwritten)

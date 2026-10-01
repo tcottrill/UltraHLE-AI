@@ -26,6 +26,9 @@ void    hw_selectpad(int pad);
 void    hw_sp_statuswrite(void);
 void    hw_sp_dmawrite(void);
 void    hw_sp_taskdone(void);
+void    hw_dp_statuswrite(dword value);
+void    hw_save(FILE *f1);   // save state block (after lle_save)
+void    hw_load(FILE *f1);   // missing in older states: nothing pending
 
 #ifdef __cplusplus
 };

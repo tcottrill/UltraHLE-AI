@@ -3,7 +3,7 @@
 
 //#define DYNAMICPRIORITY
 
-#define CLOCKRATE 45637500
+#define CLOCKRATE 46875000 // TEST: the N64's Count rate (was 45637500)
 
 #define TIMERS
 
@@ -287,13 +287,14 @@ void osCreateThread(dword m_thread,dword id, dword m_routine,
     thread[id].st.thread=id;
     thread[id].st.nextswitch=256;
     thread[id].st.pc     =m_routine; // PC
-    thread[id].st.g[ 4].d=m_param;
+    // 32-bit values sign-extended: the game compares all 64 bits (gpr_s)
+    thread[id].st.g[ 4].q=(qword)(qint)(int)m_param;
     // libultra reserves the o32 argument home area at thread entry.
     // Starting eight bytes too high also shifts saved registers onto
     // Smash's stack guard during its sprite-allocation call chain.
-    thread[id].st.g[29].d=m_stack-16; // SP
+    thread[id].st.g[29].q=(qword)(qint)(int)(m_stack-16); // SP
 
-    thread[id].st.g[31].d=0x3ff0000; // return address os segment
+    thread[id].st.g[31].q=0x3ff0000; // return address os segment
 
     ROS[0]=PATCH(58); // returning from the entry point destroys this thread
     WOS[0]=PATCH(58);
@@ -845,8 +846,11 @@ void osGetTime(dword *lo,dword *hi)
 {
     qreg x;
     double d;
-    x.q=(qint)st.retraces*(CLOCKRATE/60);  // total frames
-    x.q+=(st.cputime-st2.retracetime); // within frame
+    // sync_clock: it never goes back (a game that polls instead of waiting
+    // for the retrace ran past the frame, and the next retrace took the
+    // time back) and never stands still (Star Wars Episode I Racer divides
+    // by the difference of two readings)
+    x.q=(qint)sync_clock();
     if(0)
     {
         d=(double)(qint)x.q / CLOCKRATE;
@@ -1384,6 +1388,11 @@ int osSpTaskYield(void)
 int osSpTaskYielded(dword m_task)
 {
     logo(BLUE"osSpTaskYielded(%08X) (ra=%08X)\n",A0.d,RA.d);
+    // a gfx task is run whole (hw_rspcheck): once it has run there is
+    // nothing to resume. Told "yielded", Star Wars Episode I Racer started
+    // the same display list again after every audio task, in the end with
+    // the next scene loaded over its models.
+    if(!st2.gfxpending) return(0);
     return(1); // OS_TASK_YIELDED;
 }
 

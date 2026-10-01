@@ -133,6 +133,16 @@ void p_osViGetCurrentFrameBuffer(void)
     logo("osViGetCurrentFrameBuffer=%08X (next=%08X) [from %08X]\n",V0.d,st.fb_next,RA.d);
 }
 
+void p_osDpGetStatus(void)
+{
+    V0.d=RDP[3];
+}
+
+void p_osDpSetStatus(void)
+{
+    hw_dp_statuswrite(A0.d);
+}
+
 void p_osAiSetNextBuffer(void)
 {
     V0.d=osAiSetNextBuffer(A0.d,A1.d);
@@ -528,9 +538,22 @@ void p_memcpy(void)
 // moving (as VI_CURRENT does in LLE), so polling loops end
 static dword vimode;
 
+// The screen size comes from the mode (OSViMode: comRegs width +8, hStart
+// +0x1C, xScale +0x20; fldRegs[0] yScale +0x2C, vStart +0x30), as LLE takes
+// it from the VI registers. GoldenEye passes a 440x330 mode every retrace;
+// HLE only knew 320/640 buffers or a full-screen fillrect, so its 440 wide
+// frames were drawn offscreen (render to texture) and the screen stayed
+// black.
 void p_osViSetMode(void)
 {
     vimode=A0.d;
+    if(vimode)
+    {
+        init.visize=1;
+        vi_screensize(mem_read32(vimode+0x08),mem_read32(vimode+0x1C),
+                      mem_read32(vimode+0x30),mem_read32(vimode+0x20),
+                      mem_read32(vimode+0x2C));
+    }
 }
 
 void p_osViGetCurrentMode(void)
@@ -649,6 +672,8 @@ p_osGetThreadPri,
 p_osContReset,
 // 65
 p_osIntMask,
+p_osDpGetStatus,
+p_osDpSetStatus,
 NULL};
 
 void op_patch(int patch)
@@ -673,5 +698,9 @@ void op_patch(int patch)
         return;
     }
     patchtable[patch]();
+    // the routines write 32-bit results into the low words; the game's
+    // compares and branches read all 64 bits (cpuc.c gpr_s)
+    V0.q=(qword)(qint)(int)V0.d;
+    V1.q=(qword)(qint)(int)V1.d;
 }
 

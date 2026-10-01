@@ -252,7 +252,8 @@ typedef struct
     int    keyboarddisable;
 
     int    lleos;  // 1 = LLE OS mode: game runs its own libultra (lle.c)
-    int    RESERVED6[39];
+    int    clockahead; // HLE: retraces that came due and aren't in retraces (sync_clock)
+    int    RESERVED6[38];
     int    magic;  // set to MAGIC1 in newver versions, 0 in old versions
 } State;
 
@@ -394,6 +395,7 @@ typedef struct
 
     int    viewportwid;
     int    viewporthig;
+    int    visize;       // HLE: the size came from the game's osViSetMode
 } Init;
 
 #define BAILOUTNOW  -100000

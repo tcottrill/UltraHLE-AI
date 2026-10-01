@@ -277,6 +277,10 @@ void SP_DMA_READ(void)
     GET_RCP_REG(SP_STATUS_REG)   &= ~SP_STATUS_DMA_BUSY;
     return;
 }
+/* UltraHLE: told of the RDRAM a DMA has written, first byte and the one
+ * after the last (rsp_cxd4_init; see rsp_cxd4/UPSTREAM) */
+void (*cxd4_dmatoram)(unsigned long first, unsigned long end);
+
 void SP_DMA_WRITE(void)
 {
     unsigned int offC, offD; /* SP cache and dynamic DMA pointers */
@@ -284,6 +288,7 @@ void SP_DMA_WRITE(void)
     register unsigned int count;
     register unsigned int skip;
     unsigned int rows;
+    unsigned long first = ~0ul, end = 0;
 
     length = (GET_RCP_REG(SP_WR_LEN_REG) & 0x00000FFFul) >>  0;
     count  = (GET_RCP_REG(SP_WR_LEN_REG) & 0x000FF000ul) >> 12;
@@ -309,9 +314,15 @@ void SP_DMA_WRITE(void)
             if (offD > su_max_address)
                 continue;
             memcpy(DRAM + offD, DMEM + offC, 8);
+            if (offD < first)
+                first = offD;
+            if (offD + 8 > end)
+                end = offD + 8;
         } while (i < length);
     } while (count);
     sp_dma_done(rows, length, skip, CR[0x3]);
+    if (cxd4_dmatoram != NULL && end > first)
+        cxd4_dmatoram(first, end);
 
     GET_RCP_REG(SP_DMA_BUSY_REG)  =  0x00000000;
     GET_RCP_REG(SP_STATUS_REG)   &= ~SP_STATUS_DMA_BUSY;
@@ -1164,6 +1175,8 @@ PROFILE_MODE void COP2(u32 inst)
  * so it can go on beside the CPU (see rsp_cxd4/UPSTREAM). */
 int cxd4_budget;
 int cxd4_budgetout;
+/* UltraHLE: instructions run with a budget, for the performance report */
+unsigned long long cxd4_ran;
 
 NOINLINE void run_task(void)
 {
@@ -1171,6 +1184,7 @@ NOINLINE void run_task(void)
     int left = cxd4_budget;
 
     cxd4_budgetout = 0;
+    cxd4_ran += cxd4_budget;
     PC = FIT_IMEM(GET_RCP_REG(SP_PC_REG));
     for (;;) {
 #ifndef EMULATE_STATIC_PC
@@ -1325,6 +1339,8 @@ RSP_halted_CPU_exit_point:
     }
 #endif
     GET_RCP_REG(SP_PC_REG) = 0x04001000 | FIT_IMEM(PC);
+    if (cxd4_budget != 0 && left > 0)
+        cxd4_ran -= left; /* halted before the budget was used up */
 
     return;
 }

@@ -32,6 +32,15 @@ int xgl_tex_nearest(int h)
     return t?(t->format&X_NOBILIN)!=0:0;
 }
 
+// the texture's own clamp, bit 0 s and bit 1 t (as x_createtexture sets it):
+// x_rectclamp's sampler replaces the wrap of both axes and keeps these
+int xgl_tex_clamp(int h)
+{
+    xgl_texture *t=get(h);
+    if(!t || !(t->format&X_CLAMP)) return 0;
+    return ((t->format&X_CLAMPNOX)?0:1)|((t->format&X_CLAMPNOY)?0:2);
+}
+
 int x_createtexture(int format,int width,int height)
 {
     int h,clamps,clampt,nearest;

@@ -17,6 +17,7 @@ static Timer retracetimer;
 static Timer longtimer;
 
 #define SOUNDTARGET      20000   // try to keep 20Kbytes of sound in buffer
+#define SYNC_HELDMAX     30      // HLE: retraces held back for a game that doesn't take the message
 
 void sync_init(void)
 {
@@ -145,6 +146,84 @@ void sync_audio(void)
     }
 }
 
+/****************************************************************************
+** The clock of osGetTime and osGetCount (HLE)
+**
+** It follows the VI: a frame of clocks for every retrace that has come due,
+** delivered or not (a game that doesn't take its retrace messages has them
+** held back and dropped, sync_checkretrace), and within the frame the part
+** of it the CPU has run. It never goes back and it never stands still while
+** the CPU runs.
+**
+** Star Wars Episode I Racer takes a lower osGetCount for a wrap and adds
+** 91 s, and it takes its frame time from two readings and divides by it:
+** with a clock that stopped at the frame's end until the next delivered
+** retrace, half a second of held retraces gave it dt = 0, 1/0 in its
+** physics and NaN for every position (HUD over a black world).
+**
+** st.clockahead (saved in states) counts the retraces that came due and
+** aren't in st.retraces. Within the frame the CPU's clocks are scaled by
+** what it ran between the last retraces, so the frame's end is reached
+** about when the next one is due; past nine tenths the rest is approached
+** without being reached.
+*/
+
+static qword clock_tickcpu;   // cputime when the last retrace came due
+static qword clock_period[2]; // CPU clocks between the last ones
+static int   clock_set;
+
+// a retrace has come due
+static void clock_tick(void)
+{
+    if(st.lleos) return;
+    if(clock_set && st.cputime>clock_tickcpu)
+    {
+        clock_period[1]=clock_period[0];
+        clock_period[0]=st.cputime-clock_tickcpu;
+    }
+    clock_tickcpu=st.cputime;
+    clock_set=1;
+    st.clockahead++;
+}
+
+// ... and was delivered: st.retraces has it now
+static void clock_delivered(void)
+{
+    if(st.clockahead>0) st.clockahead--;
+}
+
+// a state was loaded (st.cputime, st.retraces and st.clockahead are its own)
+void sync_clockload(void)
+{
+    clock_set=0;
+}
+
+qword sync_clock(void)
+{
+    qword  frame=os_clockrate()/60;
+    qword  period;
+    double x;
+
+    if(!clock_set || st.cputime<clock_tickcpu || st.cputime-clock_tickcpu>frame*120)
+    { // first reading, or a state was loaded: a frame on from there, past
+      // any time the game has read
+        clock_tickcpu=st.cputime;
+        clock_period[0]=clock_period[1]=0;
+        clock_set=1;
+        st.clockahead++;
+    }
+
+    // the longer of the last two periods: retraces that catch up come in
+    // pairs a few thousand clocks apart
+    period=clock_period[0]>clock_period[1]?clock_period[0]:clock_period[1];
+    if(period<frame/2) period=frame/2;
+
+    x=(double)(st.cputime-clock_tickcpu)/(double)period;
+    if(x>0.9) x=0.9+0.1*(1.0-1.0/(1.0+(x-0.9)*10.0));
+
+    return((qword)(st.retraces+st.clockahead)*frame+(qword)(x*(double)frame));
+}
+
 int sync_swappending; // osViSwapBuffer called, not shown by a retrace yet
 
 void sync_retrace(void)
@@ -156,10 +235,43 @@ void sync_retrace(void)
     // report framebuffer swap to os routines
     st.fb_current=st.fb_next;
     sync_swappending=0;
-    st.fb_next^=320*240*2;
 
     st2.retracetime=st.cputime;
     st.retraces++;
+    clock_delivered();
+#ifdef DK64_DIAGNOSTICS
+    if(getenv("DK64_TRACE") && mem.ramsize==8*1024*1024)
+    {
+        static dword lastmap=~0u,lastactive=~0u,lastidx=~0u;
+        dword map=mem_read32(0x8076A0A8),active=mem_read8(0x807444EC),idx=mem_read32(0x807F5D14);
+        if(map!=lastmap || active!=lastactive || idx!=lastidx || st.retraces%300==0)
+        {
+            qword start=((qword)mem_read32(0x807F5CE0)<<32)|mem_read32(0x807F5CE4);
+            print("dktrace: vi %i map %X next %X active %u idx %u frame %u elapsed %.3f dp %X swap %X fb %X/%X sched %u lastswap %u\n",
+                  st.retraces,map,mem_read32(0x807444E4),active,idx,mem_read32(0x8076A068),
+                  start?(double)(sync_clock()-start)/46875000.0:0.0,RDP[3],mem_read32(0x807F04E0),
+                  st.fb_current,st.fb_next,mem_read32(0x80767CC4),mem_read32(0x80746820));
+            lastmap=map; lastactive=active; lastidx=idx;
+        }
+        if(getenv("DK64_MOVE"))
+        { // movement: the player's position and control state every retrace
+            dword pl=mem_read32(0x807FBB4C);
+            if(pl>=0x80000000 && pl<0x80800000)
+            {
+                dword xi=mem_read32(pl+0x7C),yi=mem_read32(pl+0x80),zi=mem_read32(pl+0x84);
+                float x,y,z; memcpy(&x,&xi,4); memcpy(&y,&yi,4); memcpy(&z,&zi,4);
+                dword bi=mem_read32(pl+0xB8); float b; memcpy(&b,&bi,4);
+                // Actor: unkB8 speed, unkEE move angle, unkF2..unkF8 s16, unkFA collision-limited speed, unkFC collision on
+                print("dkmove: vi %i frame %u pos %.2f %.2f %.2f state %u/%u pad %08X lag %u gate %02X speed %.3f EE %04X F2 %04X F4 %04X F6 %04X F8 %04X FA %i FC %u yrot %04X\n",
+                      st.retraces,mem_read32(0x8076A068),x,y,z,mem_read8(pl+0x154),mem_read8(pl+0x155),
+                      mem_read32(0x807ECD10),mem_read32(0x80744478),mem_read8(0x8076A0B1),b,
+                      mem_read16(pl+0xEE),mem_read16(pl+0xF2),mem_read16(pl+0xF4),mem_read16(pl+0xF6),mem_read16(pl+0xF8),
+                      (short)mem_read16(pl+0xFA),mem_read8(pl+0xFC),mem_read16(pl+0xE6));
+            }
+        }
+        if(getenv("DK64_STOP_VI") && st.retraces>=atoi(getenv("DK64_STOP_VI"))) st.breakout=1;
+    }
+#endif
     if(!st.lleos) slist_aiupdate(); // HLE AI FIFO: interrupt when a buffer ends
 
     rdp_snapshotpoll(); // F10/F12 on a screen the game doesn't redraw
@@ -170,7 +282,8 @@ void sync_retrace(void)
     if(st.lleos || st.viretracecount<=1 || ++st.viretracewait>=st.viretracecount)
     {
         st.viretracewait=0;
-        os_event(OS_EVENT_RETRACE);
+        // a full queue loses the message (sync_checkretrace, SYNC_HELDMAX)
+        if(st.lleos || os_eventqueuefree(OS_EVENT_RETRACE)) os_event(OS_EVENT_RETRACE);
     }
     st2.pendingretraces--;
 
@@ -240,7 +353,7 @@ void sync_gfxframedone(void)
 void sync_checkretrace(void)
 {
     static Timer retracetimer;
-    int          us;
+    int          us,due=0;
 
     us=timer_usreset(&retracetimer);
     if(us>1000000 || us<0) us=0;
@@ -266,6 +379,8 @@ void sync_checkretrace(void)
     if(st2.usleft<0)
     {
         st2.pendingretraces++;
+        clock_tick();
+        due=1;
 
         if(!st2.frameus) st2.frameus=1000000/60;
 
@@ -275,6 +390,7 @@ void sync_checkretrace(void)
     if(st2.pendingretraces>0)
     {
         static int cnt;
+        static int held; // HLE: retraces come due with the last message not taken
         // HLE waits until the game has taken the last retrace message;
         // in LLE mode the VI interrupt is delivered regardless, except that
         // countperop games get their whole frame of CPU time first. Behind
@@ -283,7 +399,11 @@ void sync_checkretrace(void)
         // audio: Rogue Squadron's sound cut out while the host was idle a
         // third of the time.
         if(st.lleos ? (cart.countperop<=0 || lle_framedone())
-                    : os_eventqueuefree(OS_EVENT_RETRACE)) cnt++;
+                    : os_eventqueuefree(OS_EVENT_RETRACE))
+        {
+            cnt++;
+            held=0;
+        }
         else
         {
             cnt=0;
@@ -291,10 +411,23 @@ void sync_checkretrace(void)
             // even when the retrace message is held back. F-Zero X swaps
             // and polls osViGetCurrentFramebuffer from the thread that
             // would empty the retrace queue.
-            if(sync_swappending)
+            // At a retrace, not at once: Star Wars Episode I Racer draws its
+            // first two frames into one buffer and polls until that buffer
+            // is off screen, which never ended with the swap already shown.
+            if(due && sync_swappending)
             {
                 st.fb_current=st.fb_next;
                 sync_swappending=0;
+            }
+            // A game that leaves the message in the queue for good (Racer
+            // only polls the framebuffer) has its retraces all the same:
+            // libultra's VI manager sends without blocking and the message
+            // is lost. Held back forever, sound never started.
+            if(due && !st.lleos && ++held>SYNC_HELDMAX)
+            {
+                held=SYNC_HELDMAX;
+                st2.pendingretraces=1;
+                cnt=3;
             }
         }
         if(cnt>2)

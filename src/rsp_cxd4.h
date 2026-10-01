@@ -21,6 +21,8 @@ typedef struct
     void (*checkinterrupts)(void);
     void (*processrdplist)(void); // the RSP wrote DPC_END
     void (*message)(const char *text); // cxd4 warnings
+    // a DMA has written RDRAM from first up to end (may be NULL)
+    void (*dmatoram)(unsigned long first,unsigned long end);
 } RspCxd4Info;
 
 void rsp_cxd4_init(const RspCxd4Info *info);
@@ -30,6 +32,8 @@ int  rsp_cxd4_run(void);
 // instructions per rsp_cxd4_run before it returns 2 with the RSP still
 // running (0: run until it halts)
 void rsp_cxd4_budget(int instructions);
+// instructions run so far by budgeted runs (the performance report)
+unsigned long long rsp_cxd4_ran(void);
 // SP DMA with the length already in spreg[2] (read) or spreg[3] (write)
 void rsp_cxd4_dmaread(void);
 void rsp_cxd4_dmawrite(void);

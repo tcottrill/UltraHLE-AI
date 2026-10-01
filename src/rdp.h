@@ -63,6 +63,8 @@ int  rdp_cmd(dword *cmd);
 
 // one command of a raw RDP list (DPC registers), drawn with OpenGL
 void rdp_rawcmd(const dword *w,int words);
+void rdp_rawlistend(void); // a raw command list has ended (vifb=1: write back)
+void rdp_ramwritten(dword first,dword end); // the RSP has written RDRAM by DMA
 
 // drawing (draw commands C0..CF,E4,E5 *not* interpreted with rdp_cmd)
 void rdp_fillrect(TexRect *tr);
