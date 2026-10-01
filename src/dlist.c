@@ -86,6 +86,7 @@ typedef struct
     dword   loadrspdata;
     int     s2dex;       // S2DEX microcode running (task ucode or G_LOAD_UCODE)
     int     cbfd;        // Conker's F3DEXBG: F3DEX2 plus TRI4, its own lighting
+    int     inlinedl;    // Cruis'n Exotica's patched F3DEX2: D5 runs an inline list
     // Conker's lighting (GLideN64 F3DEX2CBFD): the last light is the ambient,
     // the one before it directional, the others point lights. It scales the
     // vertex colors when the vertices load (g_cbfdlightvx).
@@ -100,6 +101,8 @@ typedef struct
     dword   sprite2d;    // Fast3D Sprite2D: uSprite of the last SPRITE2D_BASE (0: none)
     float   sprscalex,sprscaley; // its SCALEFLIP scale (u5.10) and flips
     int     sprflip;
+    int     pdvx;        // Perfect Dark's Fast3D: 12-byte vertices with a color index
+    dword   vtxcolorbase;// its vertex color table (command 07)
     // what has changed (checked at startdrawing())
     int     newsettings;
     int     newtexture;
@@ -812,8 +815,21 @@ void g_loadvtx(dword addr,int v0,int vn)
         ipos1  =mem_read32p(addr+0);
         ipos2  =mem_read32p(addr+4);
         itex   =mem_read32p(addr+8);
-        v->icol=mem_read32p(addr+12);
-        addr+=16;
+        if(gst.pdvx)
+        { // Perfect Dark (GLideN64 gSPCIVertex): x y z, a flag byte, the
+          // color's byte offset in the table of command 07, s t. The table
+          // entry is the usual color or normal word.
+            dword ca=gst.vtxcolorbase+(ipos2&0xff);
+            int   sh=(ca&3)*8;
+            v->icol=mem_read32p(ca&~3);
+            if(sh) v->icol=(v->icol<<sh)|(mem_read32p((ca&~3)+4)>>(32-sh));
+            addr+=12;
+        }
+        else
+        {
+            v->icol=mem_read32p(addr+12);
+            addr+=16;
+        }
         if(cbfdlit)
             v->icol=g_cbfdlightvx(v->icol,i,(float)(short)(ipos1>>16),
                 (float)(short)(ipos1&0xffff),(float)(short)(ipos2>>16),ipos2&0xffff,cbfddirs);
@@ -1552,6 +1568,22 @@ void c_dlbranch(dword a,int branch,int limit)
     }
 }
 
+// Cruis'n Exotica's F3DEX2 (same version string as the stock 2.08) is patched:
+// D5 (G_SPECIAL_1, a no-op in the stock one) copies (w0&0xffffff) commands
+// from the physical address in w1, no segment, into DMEM and runs them before
+// the list goes on. Nearly all of the game's geometry is in such lists. A D5
+// inside one replaces what was left of it.
+void c_dlinline(dword w0,dword w1)
+{
+    int   count=w0&0xffffff;
+    dword addr=w1&0xffffff;
+    logd(" Inline list at %08X, %i commands",addr,count);
+    if(!count) return;
+    if(dllimit<=0) stack[stackp++]=dlpnt;
+    dlpnt=addr;
+    dllimit=count+1;
+}
+
 void c_dlend(void)
 {
     dlpnt=stack[--stackp];
@@ -1560,13 +1592,19 @@ void c_dlend(void)
 
 // G_MODIFYVTX (F3DEX B2, F3DEX2 02; GLideN64 gSPModifyVertex): overwrite
 // one field of loaded vertex (w0&0xffff)/2. The vertex is initialized
-// (scaled) first; a new ST takes the texture scale too. Wipeout 64 sets its
-// texture coordinates this way: without it they flickered between stale
-// values.
-void c_modifyvtx(void)
+// (scaled) first. Wipeout 64 sets its texture coordinates this way: without
+// it they flickered between stale values.
+// The ST goes in as it is: the microcode writes the word into its vertex
+// buffer, where a loaded vertex's ST is already scaled (GLideN64 divides by
+// the scale it applies later). Top Gear Overdrive gives 0..64 for its 64
+// texel menu tiles at G_TEXTURE scale 0.5, Cruis'n USA 0..31.5 for 32 texel
+// pieces; scaled again, the changed corners sampled half way and every
+// tile was sheared. Chef's Luv Shack's 0..127 for 64 texels is halved by
+// its texture perspective being off (rdp.c tri_texhalf), not by the scale.
+// A G_TEXTURE scale of 0 does not matter here either (Harvest Moon 64's
+// ground tiles).
+void c_modifyvtx2(int i,int where,dword val)
 {
-    int    i=(cmd[0]&0xffff)>>1,where=(cmd[0]>>16)&0xff;
-    dword  val=cmd[1];
     Vertex *v;
 
     if(i<0 || i>=MAXRDPVX) return;
@@ -1589,17 +1627,6 @@ void c_modifyvtx(void)
     case 0x14: // G_MWO_POINT_ST (s10.5)
         v->tex[0]=(float)(short)(val>>16);
         v->tex[1]=(float)(short)val;
-        // scaled like a loaded vertex (g_initvx): Chef's Luv Shack's title
-        // tiles are 64 texels at scale 0.5 with ST 0..127; unscaled, the
-        // clamp smeared the last texel over half of every letter. A scale
-        // of 0 counts as 1 (GLideN64 gSPTexture): Harvest Moon 64 sets
-        // G_TEXTURE 0,0 before giving every ground tile its ST this way,
-        // and scaled by 0 all of them sampled one texel (flat colours)
-        if(gst.texenable)
-        {
-            if(gst.scales!=0.0f) v->tex[0]*=gst.scales;
-            if(gst.scalet!=0.0f) v->tex[1]*=gst.scalet;
-        }
         logd(" modifyvtx %i st %.2f %.2f",i,v->tex[0]/32,v->tex[1]/32);
         break;
     case 0x18: // G_MWO_POINT_XYSCREEN (s13.2 screen pixels)
@@ -1627,6 +1654,11 @@ void c_modifyvtx(void)
         }
         break;
     }
+}
+
+void c_modifyvtx(void)
+{
+    c_modifyvtx2((cmd[0]&0xffff)>>1,(cmd[0]>>16)&0xff,cmd[1]);
 }
 
 void c_dmavtx(dword a,int v0,int vn)
@@ -2328,6 +2360,14 @@ void rsp_cmd_basic(int c)
         c_dlend();
         break;
     case 0x07: // DLINMEM
+        if(gst.pdvx)
+        { // Perfect Dark: the table its vertices' color indices point into.
+          // Followed as a list, the colors were read as commands (hundreds
+          // of "unknown command" a frame, and the list was dropped)
+            gst.vtxcolorbase=address(cmd[1]);
+            logd(" vertex color base %08X",gst.vtxcolorbase);
+            break;
+        }
         {
             c_dlbranch(address(cmd[1]),0,(cmd[0]>>16)&255);
         } break;
@@ -2353,6 +2393,19 @@ void rsp_cmd_basic(int c)
         {
             int ind=(cmd[0]>>8)&255;
             int m=(cmd[0]>>0)&15;
+            // G_MW_POINTS: Fast3D's gSPModifyVertex, a word written into the
+            // RSP's vertex buffer (40 bytes a vertex, a 16-bit offset; the
+            // fields are G_MODIFYVTX's). Cruis'n USA loads its quads with one
+            // placeholder ST and gives each triangle its own this way:
+            // skipped, its logo, track pictures and name plates were smears
+            // of a single texel row or column.
+            if(m==0x0c && !cart.dlist_diddlyvx)
+            {
+                int off=(cmd[0]>>8)&0xffff;
+                logd(" Mem[12][%04X]=%08X",off,cmd[1]);
+                c_modifyvtx2(off/40,off%40,cmd[1]);
+                break;
+            }
             c_moveword(m,ind,cmd[1]);
         }
         break;
@@ -2818,6 +2871,10 @@ void rsp_cmd_zelda(int c)
         {
             c_dlbranch(gst.loadrspdata,0,0);
         } break;
+    case 0xd5:
+        if(gst.inlinedl) c_dlinline(cmd[0],cmd[1]);
+        else logd("!skipz");
+        break;
 //------------------------------------------ settings
     case 0xd9: // SETGEOMETRYMODE
         c_setgeommode(2,cmd[0]&0xffffff); // and
@@ -2934,6 +2991,7 @@ static int dlist_detectucode(OSTask_t *task)
     static int   lastucode;
     static int   lasts2dex;
     static int   lastcbfd;
+    static int   lastinlinedl;
     dword addr=task->m_ucode_data;
     int   size=task->ucode_data_size;
     char  text[64];
@@ -2950,12 +3008,27 @@ static int dlist_detectucode(OSTask_t *task)
     }
     gst.s2dex=lasts2dex;
     gst.cbfd=lastcbfd;
+    gst.inlinedl=lastinlinedl;
     gst.cbfdadv=0; // each task starts in the basic lighting mode
     if(addr==lastaddr && size==lastsize && crc==lastcrc) return(lastucode);
 
     ucode=ucode_findtext(addr,size,text);
     lasts2dex=gst.s2dex=(strstr(text,"S2DEX")!=NULL);
     lastcbfd=gst.cbfd=(strstr(text,"F3DEXBG")!=NULL); // Conker's Bad Fur Day
+    // Cruis'n Exotica's D5 handler, found by its code (the string is stock):
+    // sll s3,s3,8; srl s3,s3,5; sub gp,r0,s3. ucode_size is 0 in its tasks.
+    lastinlinedl=0;
+    if(ucode==UCODE_F3DEX2)
+    {
+        for(i=0;i<0x1000-8;i+=4)
+        {
+            if(mem_read32p(task->m_ucode+i)==0x00139A00 &&
+               mem_read32p(task->m_ucode+i+4)==0x00139942 &&
+               mem_read32p(task->m_ucode+i+8)==0x0013E022) { lastinlinedl=1; break; }
+        }
+    }
+    gst.inlinedl=lastinlinedl;
+    if(gst.inlinedl) print("dlist: microcode runs inline lists (D5)\n");
 
     print("dlist: microcode %s -> %s\n",*text?text:"(no version string)",
         ucode==UCODE_F3D   ?"Fast3D":
@@ -2979,6 +3052,28 @@ static int   dl_nosynccnt;
 
 static int  dlist_walk(void);
 static void dlist_finish(void);
+
+// A task starts with the microcode's own othermode words: the RSP's data
+// memory is loaded from the task's microcode data, which holds EF080CFF
+// 00000000 (texture perspective on), and G_SETOTHERMODE_H/L change fields of
+// that copy. Kept from zero and from task to task instead, Harvest Moon 64,
+// which never sets texture perspective, drew everything with it off: its
+// texture coordinates were taken at half (rdp.c tri_texhalf) and every tile,
+// sprite and letter showed a quarter of its texture.
+static void dlist_startothermode(OSTask_t *task)
+{
+    int i,size=task->ucode_data_size;
+    if(size<=0 || size>0x800) size=0x800;
+    for(i=0;i+8<=size;i+=4)
+    {
+        if(mem_read32p(task->m_ucode_data+i)==0xEF080CFF)
+        {
+            gst.omodeh=0x080CFF;
+            gst.omodel=mem_read32p(task->m_ucode_data+i+4);
+            return;
+        }
+    }
+}
 
 int dlist_execute(OSTask_t *task)
 {
@@ -3070,6 +3165,30 @@ int dlist_execute(OSTask_t *task)
         }
         if(errorcount>n/4)
         {
+            // Not a display list, and its microcode has no graphics version
+            // string: a task of the game's own sent with the graphics type.
+            // Last Legion UX sends one before every display list, a table of
+            // pointers for a second microcode; dropped, whatever it computes
+            // for the frame was missing. HLE OS: it runs on the RSP
+            // interpreter like the task types with no HLE (rsp_runtask), and
+            // ends without a frame or a DP interrupt of its own.
+            if(!st.lleos)
+            {
+                char text[64];
+                int  size=task->ucode_data_size;
+                if(size<=0 || size>0x1000) size=0x1000;
+                if(ucode_findtext(task->m_ucode_data,size,text)==UCODE_UNKNOWN && !*text)
+                {
+                    static dword told;
+                    if(told!=task->m_ucode)
+                    {
+                        told=task->m_ucode;
+                        print("dlist: task with microcode %08X is no display list: run on the RSP interpreter\n",task->m_ucode);
+                    }
+                    rsp_runtask(task);
+                    return(0);
+                }
+            }
             error("dlist: display list doesn't look right (ecnt=%i/%i)",errorcount,n/4);
             dlist_abort();
             return(0);
@@ -3077,7 +3196,11 @@ int dlist_execute(OSTask_t *task)
         errorcount=0;
     }
 
+    dlist_startothermode(task);
+
     cart.dlist_wrusvx=0; // re-detected from this task's first G_VTX
+    gst.pdvx=0;
+    gst.vtxcolorbase=0;
     switch(dlist_detectucode(task))
     {
     case UCODE_F3D:
@@ -3099,6 +3222,15 @@ int dlist_execute(OSTask_t *task)
         break;
     default: // no version string: previous title-based choice
         if(!strncmp(cart.title,"Diddy Kong Racing",16)) cart.dlist_diddlyvx=1;
+        // Perfect Dark: Rare's Fast3D (GLideN64 F3DPD), GoldenEye's with
+        // color-indexed vertices. Fast3D vertex counts, 4-triangle B1.
+        if(!strncmp(cart.title,"Perfect Dark",12))
+        {
+            gst.pdvx=1;
+            cart.dlist_diddlyvx=0;
+            cart.dlist_wavevx=1;
+            cart.dlist_geyevx=1;
+        }
         if(cart.ismario) cart.dlist_wavevx=1;
         else if(cart.iszelda) cart.dlist_zelda=1;
         else cart.dlist_zelda=0;

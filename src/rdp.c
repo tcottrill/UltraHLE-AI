@@ -284,6 +284,7 @@ typedef struct
     int       foglasttype;
 
     // framebuffer texturing detection
+    dword     framecbuf;         // the frame's first screen-width color image (0: none yet)
     dword     lastcbufs[8];      // recent color image addresses (ring)
     int       lastcbufwid[8];    // their widths in pixels
     int       lastcbufbytes[8];  // their bytes per pixel
@@ -291,6 +292,7 @@ typedef struct
     int       lastcbufi;
     int       lastcbufframe[8];  // rst.myframe when each was last set as the color image
     int       scissorhig;        // current scissor's lower edge in lines
+    int       scissorwid;        // and its right edge in pixels
     char     *framegrab;         // RGBA copy of the last presented frame
     int       grabw,grabh;       // its size (init.gfxwid x init.gfxhig)
     int       grabframe;         // frontframe it was taken from
@@ -390,6 +392,7 @@ typedef struct
     int       s_tluttype;
     int       s_zsrc;
     float     k4,k5;   // SETCONVERT's combiner constants (0..1)
+    int       kyuv[4]; // SETCONVERT's K0..K3 (signed), for YUV texels
     // raw RDP lists: SET_PRIM_DEPTH (0..1), and whether new vertices take
     // it (rectangles with primitive depth selected); see rdp_rawcmd
     float     primz;
@@ -567,6 +570,19 @@ static __inline dword address(dword address)
     return( ((address&0xffffff) + rst.segment[seg]) & 0xffffff );
 }
 
+// The current scissor's lower edge as the height of a wid pixels wide color
+// buffer. A scissor wider than the buffer was not set for it and counts for
+// no more than wid*3/4 lines: Top Gear Overdrive opens the scissor to
+// 640x480 at the start of each frame, over 320 wide buffers. Taken as 480
+// lines high, the z image and the frame buffers covered the textures stored
+// after them: its sky came out as placeholders, its road from the last frame.
+static int cbuf_scissorhig(int wid)
+{
+    int h=rst.scissorhig;
+    if(rst.scissorwid>wid && h>wid*3/4) h=wid*3/4;
+    return(h);
+}
+
 static void setbuffer(int i,dword c0,dword c1)
 {
     dword addr=address(c1);
@@ -597,8 +613,8 @@ static void setbuffer(int i,dword c0,dword c1)
         rst.lastcbufwid  [rst.lastcbufi]=rst.bufwid[i];
         rst.lastcbufbytes[rst.lastcbufi]=bytes;
         rst.lastcbufframe[rst.lastcbufi]=rst.myframe;
-        if(rst.scissorhig>rst.lastcbufhig[rst.lastcbufi])
-            rst.lastcbufhig[rst.lastcbufi]=rst.scissorhig;
+        if(cbuf_scissorhig(rst.bufwid[i])>rst.lastcbufhig[rst.lastcbufi])
+            rst.lastcbufhig[rst.lastcbufi]=cbuf_scissorhig(rst.bufwid[i]);
     }
 }
 
@@ -1130,6 +1146,39 @@ int txt_checkalpha(byte *dst,int dx,int dy)
     return(0);
 }
 
+// A transparent texel (alpha 0) next to visible ones takes their average
+// colour and stays transparent. A texture rectangle drawn 1:1 samples texel
+// centres on the RDP, so what colour a transparent texel has never shows;
+// drawn larger here with a filter, it is mixed into the edge. Cruis'n World's
+// font has a bright green palette entry (0x0640) as its transparent colour
+// and a black outline, and every letter had a green rim. One ring is what a
+// bilinear filter reaches; a changed texel is no source for the next one.
+void txt_keybleed(byte *dst,int dx,int dy)
+{
+    static const int ox[8]={-1,1,0,0,-1,1,-1,1};
+    static const int oy[8]={0,0,-1,1,-1,-1,1,1};
+    dword *dw=(dword *)dst;
+    int    x,y,i,n;
+    for(y=0;y<dy;y++) for(x=0;x<dx;x++)
+    {
+        dword c0=0,c1=0,c2=0,d;
+        if(dw[x+y*dx]>>24) continue;
+        n=0;
+        for(i=0;i<8;i++)
+        {
+            int xx=x+ox[i],yy=y+oy[i];
+            if(xx<0 || yy<0 || xx>=dx || yy>=dy) continue;
+            d=dw[xx+yy*dx];
+            if(!(d>>24)) continue;
+            c0+=d&255;
+            c1+=(d>>8)&255;
+            c2+=(d>>16)&255;
+            n++;
+        }
+        if(n) dw[x+y*dx]=(c0/n)|((c1/n)<<8)|((c2/n)<<16);
+    }
+}
+
 void txt_border(byte *dst,int dx,int dy,dword col)
 {
     dword *dw=(dword *)dst;
@@ -1209,9 +1258,10 @@ int txt_rl(Tile *t)
     {
         // LOADBLOCK: rows follow the tile's TMEM line. 32-bit texels are
         // split into RG and BA halves of TMEM, so the line covers only half
-        // of a row's bytes in RDRAM.
+        // of a row's bytes in RDRAM. 16-bit YUV likewise: UV in one half,
+        // the Y bytes in the other.
         rl=t->tmemrl;
-        if(t->bpp==3) rl*=2;
+        if(t->bpp==3 || (t->bpp==2 && t->fmt==1)) rl*=2;
         // no line on the tile: the row length its dxt gave (-memrl)
         if(rl<=0 && t->memrl<-1) rl=-t->memrl;
     }
@@ -1309,6 +1359,25 @@ dword txt_calccrc(Tile *t)
     if(st.dumpgfx) logd("\n+tile calccrc %08X,%i -> %08X",addr,size,crc);
 
     return(crc);
+}
+
+// A YUV texel as the RDP's texture convert makes it (cycle type "conv", as
+// angrylion): u,v around 128, K0..K3 SETCONVERT's signed 9-bit values, each
+// taken as (2K+1)/256. The alpha is the luma. The RDP keeps 9 signed bits
+// for the combiner's (TEXEL0-K4)*K5+TEXEL0; clamped here, which gives the
+// same result after that step.
+void txt_yuvtexel(byte *dst,int y,int u,int v,const int *k)
+{
+    int r,g,b;
+    u-=128;
+    v-=128;
+    r=y+(((2*k[0]+1)*v+128)>>8);
+    g=y+(((2*k[1]+1)*u+(2*k[2]+1)*v+128)>>8);
+    b=y+(((2*k[3]+1)*u+128)>>8);
+    dst[0]=r<0?0:r>255?255:r;
+    dst[1]=g<0?0:g>255?255:g;
+    dst[2]=b<0?0:b>255?255:b;
+    dst[3]=y;
 }
 
 byte *txt_loadline(byte *mbuf,dword addr,int y,int flip,int rl2)
@@ -1574,6 +1643,21 @@ void txt_convert(byte *dst0,Tile *t)
                 *dst++=i;
                 *dst++=a;
                 m+=2;
+            }
+        }
+    }
+    else if(bpp==2 && fmt==1)
+    { // YUV 16bit: U Y0 V Y1 for each pair of texels. Bottom of the 9th
+      // decodes its pictures as JPEG on the RSP and draws the 16x16 blocks
+      // into a buffer with these (a checkerboard while unsupported).
+        for(y=0;y<ys;y++)
+        {
+            m=madd+txt_loadline(mbuf,addr,y,flip,rl2);
+            for(x=0;x<xs;x++)
+            {
+                byte *p=m+(x&~1)*2;
+                txt_yuvtexel(dst,p[1+(x&1)*2],p[0],p[2],rst.kyuv);
+                dst+=4;
             }
         }
     }
@@ -1971,10 +2055,16 @@ void txt_masksize(Tile *t,dword *cmd)
     // 16 texel CI8 tile plus the same bytes as CI4 with S doubled and mask
     // 32; built 16 wide, the CI4 half wrapped inside the first 8 bytes and
     // drew an X over the digits.
-    if(!(t->cms&2) && t->masks && t->masks<=10 && (1<<t->masks)>ws)
+    // A mask above 10 bits cannot wrap inside TMEM: the tile is whatever a
+    // TMEM line and the rows below its start hold. Ms. Pac-Man Maze Madness
+    // draws its storybook pictures in strips from a tile sized (0,0)-(0,0)
+    // with mirror and mask 15 on both axes, set before the strip is loaded;
+    // built 1x1, every strip that used it was one flat color.
+    if(!(t->cms&2) && t->masks && (1<<t->masks)>ws)
     {
-        int w=1<<t->masks,line=(t->tmemrl*2)>>t->bpp; // texels per TMEM line
+        int w=1<<(t->masks>10?10:t->masks),line=(t->tmemrl*2)>>t->bpp; // texels per TMEM line
         if(line>0 && w>line) w=line;
+        if(w>1024-(int)FIELD(cmd[0],14,10)) w=1024-(int)FIELD(cmd[0],14,10);
         if(w>ws) cmd[1]=(cmd[1]&~(0x3ff<<14))|((FIELD(cmd[0],14,10)+w-1)<<14);
     }
     // The height stops at the rows the tile's load put into TMEM: the ones
@@ -1982,10 +2072,23 @@ void txt_masksize(Tile *t,dword *cmd)
     // its logos as 32x32 pieces, mirror with mask 9, each followed in RDRAM
     // by its palette. Built 512 rows high, a piece's last row was filtered
     // with the palette's bytes, a dashed line along every piece.
-    if(!(t->cmt&2) && t->maskt && t->maskt<=10 && (1<<t->maskt)>wt)
+    // (a mask above 10: all the rows TMEM has from the tile's start, since
+    // the load that fills them may come after the tile's size)
+    if(!(t->cmt&2) && t->maskt && (1<<t->maskt)>wt)
     {
-        int h=1<<t->maskt,rows=txt_loadedrows(t);
+        int h,rows;
+        if(t->maskt>10)
+        {
+            h=1024;
+            rows=(t->tmemrl>0 && t->tmembase<4096)?(4096-t->tmembase)/t->tmemrl:0;
+        }
+        else
+        {
+            h=1<<t->maskt;
+            rows=txt_loadedrows(t);
+        }
         if(rows>0 && h>rows) h=rows;
+        if(h>1024-(int)FIELD(cmd[0],2,10)) h=1024-(int)FIELD(cmd[0],2,10);
         if(h>wt) cmd[1]=(cmd[1]&~(0x3ff<<2))|((FIELD(cmd[0],2,10)+h-1)<<2);
     }
 }
@@ -2076,6 +2179,8 @@ void txt_loaddata(Texture *txt,Tile *t)
             // convert to RGBA
             txt_convert(s,t);
         }
+        // made for a texture rectangle: no colour from its transparent texels
+        if(rst.rectmode==1) txt_keybleed(s,t->xs,t->ys);
     }
 
     // check for alpha
@@ -2160,6 +2265,17 @@ void txt_loaddata(Texture *txt,Tile *t)
 // wraps: Army Men Sarge's Heroes draws its soldiers' shine with tile 7.
 #define TEXTILE(n) (rst.tile+(((n)+rst.texturetile)&7))
 
+// Texture perspective off (G_TP_NONE): the RDP takes a display list
+// triangle's s,t at half their value (GLideN64 halves them the same way).
+// Bust-A-Move 2 draws its aiming arrow like this, a rotated quad with s
+// 352..400 over a clamped tile at 176..199: unhalved, it sampled outside the
+// tile and the arrow was not there. Rectangles and raw RDP triangles carry
+// their own coordinates.
+static int tri_texhalf(void)
+{
+    return(rst.rectmode==0 && !FIELD(rst.other0[0],19,1));
+}
+
 void txt_setscales(int tile)
 {
     Tile    *t=TEXTILE(tile);
@@ -2207,6 +2323,14 @@ void txt_setscales(int tile)
 
     rst.txt_uscale=xd;
     rst.txt_vscale=yd;
+
+    if(tri_texhalf())
+    {
+        rst.txt_uscale*=0.5f;
+        rst.txt_vscale*=0.5f;
+        rst.txt_uadd*=2.0f;
+        rst.txt_vadd*=2.0f;
+    }
 
     if(st.dumpgfx) logd("\n+tile setscales tile %i txt %i scale %.4f,%.4f add %.4f,%.4f base %i,%i",
         tile,t->texture,rst.txt_uscale,rst.txt_vscale,rst.txt_uadd,rst.txt_vadd,t->memx0,t->memy0);
@@ -3148,6 +3272,114 @@ void txt_rectrange(float s0,float ds,float w,float org,int point,float *lo,float
     *hi=b;
 }
 
+// A flat, screen-aligned triangle (s steps along x only, t along y only) is
+// sampled like a texture rectangle: once a pixel, from its first pixel
+// column and row to its last. Gives that range in cl (s,t low, then s,t
+// high, as txt_rectrange) and returns 1, or 0 for any other triangle.
+// x,y in pixels, s,t and the tile's origin in 1/32 texels.
+int txt_trirange(const float *x,const float *y,const float *s,const float *t,
+                 float orgs,float orgt,int point,float *cl)
+{
+    float px[3],py[3],area,dsdx,dsdy,dtdx,dtdy,x0,x1,y0,y1,w,h;
+    int   i;
+    for(i=0;i<3;i++)
+    { // the RDP's vertex positions have 2 fraction bits
+        px[i]=floorf(x[i]*4.0f+0.5f)/4.0f;
+        py[i]=floorf(y[i]*4.0f+0.5f)/4.0f;
+    }
+    area=(px[1]-px[0])*(py[2]-py[0])-(px[2]-px[0])*(py[1]-py[0]);
+    if(fabsf(area)<0.5f) return(0);
+    dsdx=((s[1]-s[0])*(py[2]-py[0])-(s[2]-s[0])*(py[1]-py[0]))/area;
+    dsdy=((s[2]-s[0])*(px[1]-px[0])-(s[1]-s[0])*(px[2]-px[0]))/area;
+    dtdx=((t[1]-t[0])*(py[2]-py[0])-(t[2]-t[0])*(py[1]-py[0]))/area;
+    dtdy=((t[2]-t[0])*(px[1]-px[0])-(t[1]-t[0])*(px[2]-px[0]))/area;
+    x0=x1=px[0];
+    y0=y1=py[0];
+    for(i=1;i<3;i++)
+    {
+        if(px[i]<x0) x0=px[i];
+        if(px[i]>x1) x1=px[i];
+        if(py[i]<y0) y0=py[i];
+        if(py[i]>y1) y1=py[i];
+    }
+    // s moving along y, or t along x, by more than 1/32 texel: not aligned
+    if(fabsf(dsdy)*(y1-y0)>1.0f || fabsf(dtdx)*(x1-x0)>1.0f) return(0);
+    // the pixels at whole x from the left edge up to, not at, the right one
+    w=ceilf(x1)-ceilf(x0);
+    h=ceilf(y1)-ceilf(y0);
+    if(w<1.0f || h<1.0f) return(0);
+    txt_rectrange(s[0]+(ceilf(x0)-px[0])*dsdx,dsdx,w,orgs,point,cl+0,cl+2);
+    txt_rectrange(t[0]+(ceilf(y0)-py[0])*dtdy,dtdy,h,orgt,point,cl+1,cl+3);
+    return(1);
+}
+
+// The start s0 of a texture rectangle on a wrapping axis, brought into the
+// tile's first wrap period (2^mask texels from the tile's origin org, twice
+// that mirrored) when the n pixels it steps ds over stay inside that period;
+// s0 as it is otherwise. s0 and org in 1/32 texels, ds a pixel in 1/1024.
+float txt_rectperiod(float s0,float ds,float n,float org,int mask,int mirror)
+{
+    float period=(float)(32<<mask)*(mirror?2:1);
+    float span=fabsf(ds)*n/32.0f;
+    float s=s0-org;
+    s-=period*floorf(s/period);
+    return (s+span<=period)?s+org:s0;
+}
+
+// A copy mode rectangle into the z image's memory, done in RDRAM: 16-bit
+// texels 1:1, the source read from RDRAM or, where it is the last presented
+// frame's color buffer (which only OpenGL has), from the frame grab. Cruis'n
+// USA keeps its pause screen's background this way: on the pause frame it
+// copies the shown frame into the z image in 320x6 strips, and every paused
+// frame copies that back to the screen. Dropped, the background was whatever
+// RDRAM held there: black with a line of noise.
+static void texrect_copytoz(TexRect *tr)
+{
+    Tile  *t=rst.tile+(tr->tile&7);
+    dword  src=rst.tmemsrc[(t->tmembase>>3)&1023]&0x1fffffff;
+    dword  dst=rst.bufbase[RDP_BUF_C]&0x1fffffff;
+    dword  fbase=rst.frontcbuf&0x1fffffff;
+    int    dw=rst.bufwid[RDP_BUF_C];
+    int    fw=rst.frontcbufwid,fh=rst.frontcbufhig>0?rst.frontcbufhig:fw*3/4;
+    int    x,y,s,tt,gx,gy,grabbed=0;
+    dword  a,d,p,c,off,*m;
+
+    if(t->bpp!=2 || rst.bufbpp[RDP_BUF_C]!=2 || t->tmemrl<=0 || dw<=0) return;
+    for(y=(int)tr->y1;y<=(int)tr->y0;y++)
+    {
+        tt=(int)(tr->t0/32.0f)+(y-(int)tr->y1);
+        for(x=(int)tr->x1;x<=(int)tr->x0;x++)
+        {
+            if(x<0 || y<0 || x>=dw) continue;
+            s=(int)(tr->s0/32.0f)+(x-(int)tr->x1);
+            a=src+tt*t->tmemrl+s*2;
+            d=dst+(y*dw+x)*2;
+            if(a+2>(dword)mem.ramsize || d+2>(dword)mem.ramsize) continue;
+            if(fw>0 && rst.frontcbufbytes==2 && a>=fbase && a<fbase+(dword)(fw*fh*2))
+            { // the shown frame: its pixel in the grab (as rdp_fbwrite)
+                if(!grabbed) { rdp_grabscreen(); grabbed=1; }
+                if(!rst.framegrab) return;
+                off=(a-fbase)/2;
+                gx=(int)(off%fw)*rst.grabw/fw;
+                gy=(int)(off/fw)*rst.grabh/fh;
+                if(gy>=rst.grabh) gy=rst.grabh-1;
+                c=((dword *)rst.framegrab)[gx+gy*rst.grabw]; // bytes R,G,B,A
+                p=((c&0xf8)<<8)|((c>>5)&0x7c0)|((c>>18)&0x3e)|1;
+            }
+            else
+            {
+                m=(dword *)(mem.ram+(a&~3));
+                p=(a&2)?(*m&0xffff):(*m>>16);
+            }
+            m=(dword *)(mem.ram+(d&~3));
+            if(d&2) *m=(*m&0xffff0000)|p;
+            else    *m=(*m&0x0000ffff)|(p<<16);
+        }
+    }
+    if(st.dumpgfx) logd("\n+texrect copied into the z image in RDRAM (%i,%i)-(%i,%i)",
+        (int)tr->x1,(int)tr->y1,(int)tr->x0,(int)tr->y0);
+}
+
 void rdp_texrect(TexRect *tr)
 {
     Primitive *p,*p2;
@@ -3158,8 +3390,12 @@ void rdp_texrect(TexRect *tr)
 
     // into the z-buffer: a depth mask, not a picture. Smash Bros draws the
     // round mask of its off-screen bubble there; on screen it was a black
-    // square around the bubble.
-    if(rst.bufbase[RDP_BUF_Z]==rst.bufbase[RDP_BUF_C]) return;
+    // square around the bubble. A copy mode one is a picture kept there.
+    if(rst.bufbase[RDP_BUF_Z]==rst.bufbase[RDP_BUF_C])
+    {
+        if(FIELD(rst.other0[0],20,2)==2) texrect_copytoz(tr);
+        return;
+    }
 
     rst.tris++;
 
@@ -3173,26 +3409,21 @@ void rdp_texrect(TexRect *tr)
     // Brought into the first period when the rectangle stays inside it.
     {
         Tile *t=TEXTILE(0);
-        float span=fabs(tr->s1)*((tr->x0-tr->x1)>(tr->y0-tr->y1)?(tr->x0-tr->x1):(tr->y0-tr->y1))/32.0f;
+        // Each axis by its own extent: s steps along x, t along y. Both were
+        // measured by the larger one, so the same game's 144x24 glow behind
+        // the selected menu line (mask 5, drawn from t=32 = 0) failed the
+        // check on t and came out 8 rows down, a green bar above and below
+        // the text. A flipped rectangle keeps the larger one.
+        float w=tr->x0-tr->x1,h=tr->y0-tr->y1;
+        if(tr->flip) w=h=(w>h?w:h);
         // The wrap is of the coordinate minus the tile's top left, as the RDP
         // takes it. Wrapped as an absolute value, SF Rush's HUD counter
         // digits (tile rows 153-169, mask 32, drawn from t=169) moved up 7
         // rows and showed two half digits.
         if(t->cms<2 && t->masks>0 && (1<<t->masks)>t->xs)
-        {
-            float period=(float)(32<<t->masks)*(t->cms==1?2:1);
-            float org=8.0f*t->x0full,s=tr->s0-org;
-            s-=period*floorf(s/period);
-            if(s+span<=period) tr->s0=s+org;
-        }
-        span=fabs(tr->t1)*((tr->x0-tr->x1)>(tr->y0-tr->y1)?(tr->x0-tr->x1):(tr->y0-tr->y1))/32.0f;
+            tr->s0=txt_rectperiod(tr->s0,tr->s1,w,8.0f*t->x0full,t->masks,t->cms==1);
         if(t->cmt<2 && t->maskt>0 && (1<<t->maskt)>t->ys)
-        {
-            float period=(float)(32<<t->maskt)*(t->cmt==1?2:1);
-            float org=8.0f*t->y0full,s=tr->t0-org;
-            s-=period*floorf(s/period);
-            if(s+span<=period) tr->t0=s+org;
-        }
+            tr->t0=txt_rectperiod(tr->t0,tr->t1,h,8.0f*t->y0full,t->maskt,t->cmt==1);
     }
 
     if(rst.s_cycles>2)
@@ -3454,6 +3685,35 @@ void fillcbuf(void)
         xs,ys);
 }
 
+// A 2D picture drawn as triangles is sampled only where the RDP samples it,
+// as a texture rectangle is (txt_trirange). Off Road Challenge draws its
+// title in strips of two triangles, 160 pixels from a tile 161 texels wide
+// whose last column is not part of the picture; drawn larger than 1x, the
+// filter took that column into the strip's last pixels, a line down the
+// middle of the screen. Clamped tiles only: a wrapping one may be meant to
+// run on into the next triangle.
+static void tri_sampleclamp(Primitive *p)
+{
+    Tile *t=TEXTILE(0);
+    float x[3],y[3],s[3],v[3],cl[4],w=p->c[0]->pos[2];
+    float f=tri_texhalf()?0.5f:1.0f; // the texels s,t stand for (txt_setscales)
+    int   i;
+    if(!rst.gamevpset || w<=0.0f) return;
+    if(t->cms<2 || t->cmt<2 || t->shifts || t->shiftt) return;
+    for(i=0;i<3;i++)
+    {
+        Vertex *c=p->c[i];
+        if(fabsf(c->pos[2]-w)>w*1e-4f) return; // in perspective
+        x[i]= c->pos[0]/w*rst.gamevp[0]+rst.gamevp[2];
+        y[i]=-c->pos[1]/w*rst.gamevp[1]+rst.gamevp[3];
+        s[i]=c->tex[0]*f;
+        v[i]=c->tex[1]*f;
+    }
+    if(!txt_trirange(x,y,s,v,8.0f*t->x0full,8.0f*t->y0full,!(rst.s_txtfilt&2),cl)) return;
+    p->clamp=1;
+    for(i=0;i<4;i++) p->tclamp[i]=cl[i]/f; // back in the vertices' units
+}
+
 void rdp_tri(int *vind)
 {
     Primitive *p;
@@ -3490,6 +3750,7 @@ void rdp_tri(int *vind)
         }
         else p->c[i]=rdpvx[vind[i]];
     }
+    tri_sampleclamp(p);
     p->wirecolor=rst.debugwirecolor;
 
     st2.gfx_tris++;
@@ -5586,6 +5847,59 @@ void dump_other(dword o0,dword o1)
     }
 }
 
+// The OpenGL blend factors for a blender mode. x holds the cycle's four
+// selects, a hex digit each: P, A, M, B of (P*A+M*B)/(A+B).
+void blend_factors(dword x,int *b1,int *b2)
+{
+    if(!x || x==0x0302)
+    {
+        *b1=X_ONE;
+        *b2=X_ZERO;
+    }
+    else if(x==0x0011)
+    {
+        *b1=X_ONE;
+        *b2=X_ZERO;
+    }
+    else if(x==0x0010)
+    {
+        *b1=X_ALPHA;
+        *b2=X_INVOTHERALPHA;
+    }
+    else if(x==0x0110)
+    {
+        // CIN*FOG_A+MEM*(1-FOG_A): the fog color's alpha fades the
+        // pixel in (flushprims). Bomberman 64 draws a black screen
+        // rectangle this way every frame, with fog alpha 0.
+        *b1=X_CONSTALPHA;
+        *b2=X_INVCONSTALPHA;
+    }
+    else if((x&0x3030)==0x1010)
+    {
+        // MEM*a+MEM*b: both colors are the frame buffer's, so the picture
+        // stays whatever the factors; the draw leaves coverage and depth.
+        // Paper Mario masks the depth buffer this way with a textured quad
+        // (MEM*AIN+MEM*AMEM) before the flash of Bowser's entrance; drawn
+        // opaque, it was a white square over him.
+        *b1=X_ZERO;
+        *b2=X_ONE;
+    }
+    else if((x&0x0333)==0x0312)
+    {
+        // any*0+MEM*1: the picture stays, only coverage is written.
+        // Star Wars Episode I Racer ends its frame with such rectangles
+        // over its text and the screen edges; opaque, they were black
+        // bars over "press start".
+        *b1=X_ZERO;
+        *b2=X_ONE;
+    }
+    else
+    {
+        *b1=X_ONE;
+        *b2=X_ZERO;
+    }
+}
+
 void change_other(dword x0,dword x1,dword c0,dword c1)
 {
     if(FIELD(c0,20,3))
@@ -5658,48 +5972,7 @@ void change_other(dword x0,dword x1,dword c0,dword c1)
 
         rst.s_blendbits=x;
 
-        if(!x || x==0x0302)
-        {
-            b1=X_ONE;
-            b2=X_ZERO;
-        }
-        else if(x==0x0011)
-        {
-            b1=X_ONE;
-            b2=X_ZERO;
-        }
-        else if(x==0x0010)
-        {
-            b1=X_ALPHA;
-            b2=X_INVOTHERALPHA;
-        }
-        else if(x==0x0110)
-        {
-            // CIN*FOG_A+MEM*(1-FOG_A): the fog color's alpha fades the
-            // pixel in (flushprims). Bomberman 64 draws a black screen
-            // rectangle this way every frame, with fog alpha 0.
-            b1=X_CONSTALPHA;
-            b2=X_INVCONSTALPHA;
-        }
-        else if(x==0x1310)
-        {
-            b1=X_ZERO;
-            b2=X_ONE; //X_INVOTHERALPHA;
-        }
-        else if((x&0x0333)==0x0312)
-        {
-            // any*0+MEM*1: the picture stays, only coverage is written.
-            // Star Wars Episode I Racer ends its frame with such rectangles
-            // over its text and the screen edges; opaque, they were black
-            // bars over "press start".
-            b1=X_ZERO;
-            b2=X_ONE;
-        }
-        else
-        {
-            b1=X_ONE;
-            b2=X_ZERO;
-        }
+        blend_factors(x,&b1,&b2);
 
         #else
 
@@ -5981,6 +6254,26 @@ static int rtt_offscreen(void)
     // RGBA 16/32-bit, or 8-bit CI/I: Yoshi's Story builds its 336x256 CI8
     // level backgrounds from 16x16 tiles with no TLUT (the index bytes)
     return((fmt==0 && (bpp==2 || bpp==3)) || (bpp==1 && (fmt==2 || fmt==4)));
+}
+
+// A second screen-width color image in a frame that already has its target,
+// one the VI has never shown: a picture kept for later, offscreen whatever
+// its width. Mario Golf renders the course once into such a buffer (with a z
+// image of its own) and copies it to the screen in strips every frame while
+// the player aims and swings. Drawn on the screen instead, RDRAM kept zeros
+// and the course was black behind the golfer. Decided at the scissor the
+// game sets for it, where the few-row targets are decided too, and only
+// while the VI's origins tell which buffers are screens.
+static int rtt_secondscreen(void)
+{
+    dword c=rst.bufbase[RDP_BUF_C];
+    int   w=rst.bufwid[RDP_BUF_C];
+    if(!rst.framecbuf || c==rst.framecbuf || c==rst.bufbase[RDP_BUF_Z]) return(0);
+    if((w!=320 && w!=640) || rst.buffmt[RDP_BUF_C]!=0 || rst.bufbpp[RDP_BUF_C]!=2) return(0);
+    if(!vi_presents() || vi_hasshown(c)) return(0);
+    if((c&0x1fffffff)==(rst.frontcbuf&0x1fffffff) ||
+       (rst.presentpending && (c&0x1fffffff)==(rst.pendingcbuf&0x1fffffff))) return(0);
+    return(1);
 }
 
 /****************************************************************************
@@ -6471,6 +6764,11 @@ int rdp_cmd(dword *cmd)
         if(rst.rtt_on && (address(cmd[1])&0x1fffffff)!=rst.rtt_addr) rtt_end();
         setbuffer(RDP_BUF_C,cmd[0],cmd[1]);
         if(!rst.rtt_on && rtt_offscreen()) rtt_begin(RTT_H);
+        // the frame's own target: the first screen-width one that is not
+        // the z image (rtt_secondscreen)
+        if(!rst.framecbuf && !rst.rtt_on && rst.bufbase[RDP_BUF_C]!=rst.bufbase[RDP_BUF_Z] &&
+           (rst.bufwid[RDP_BUF_C]==320 || rst.bufwid[RDP_BUF_C]==640))
+            rst.framecbuf=rst.bufbase[RDP_BUF_C];
         // HLE: the screen size otherwise comes only from a full screen
         // fillrect (rdp_fillrect); Pokemon Stadium's 640x480 screens clear
         // with a texrect and were drawn at 2x (only their top left quarter
@@ -6813,6 +7111,8 @@ int rdp_cmd(dword *cmd)
                (rst.bufwid[RDP_BUF_C]==320 || rst.bufwid[RDP_BUF_C]==640) &&
                rst.buffmt[RDP_BUF_C]==0 && rst.bufbpp[RDP_BUF_C]==2)
                 rtt_begin(RTT_SMALLH);
+            else if(!rst.rtt_on && rtt_secondscreen())
+                rtt_begin(RTT_H);
             if(init.viewportwid)
             {
                 xs=init.viewportwid;
@@ -6830,20 +7130,31 @@ int rdp_cmd(dword *cmd)
                 rst.rtt_maxy=FIELD(cmd[1],0,12)/4; // rows to write back
             // the current color buffer is at least this high (cbufsource)
             rst.scissorhig=(FIELD(cmd[1],0,12)+3)/4;
+            rst.scissorwid=(FIELD(cmd[1],12,12)+3)/4;
             if(rst.lastcbufs[rst.lastcbufi]==rst.bufbase[RDP_BUF_C] &&
-               rst.scissorhig>rst.lastcbufhig[rst.lastcbufi])
-                rst.lastcbufhig[rst.lastcbufi]=rst.scissorhig;
+               cbuf_scissorhig(rst.bufwid[RDP_BUF_C])>rst.lastcbufhig[rst.lastcbufi])
+                rst.lastcbufhig[rst.lastcbufi]=cbuf_scissorhig(rst.bufwid[RDP_BUF_C]);
         }
         break;
-    // Known gap: the OpenGL combiner has no key center/scale inputs, no
-    // chroma key and no YUV conversion, so these are ignored here
-    // (rdp_soft.c feeds key to its combiner). K4/K5 are combiner inputs:
-    // Conker's mouth is (SHADE-ENV)*K5+PRIM with K5=255, black without it.
+    // Known gap: the OpenGL combiner has no key center/scale inputs and no
+    // chroma key, so the key commands are ignored here (rdp_soft.c feeds
+    // key to its combiner). K4/K5 are combiner inputs: Conker's mouth is
+    // (SHADE-ENV)*K5+PRIM with K5=255, black without it. K0..K3 convert
+    // YUV texels when the texture is built (txt_yuvtexel).
     case 0xec: // RDP_SETCONVERT
+        {
+            int i,k[4];
+            k[0]=FIELD(cmd[0],13,9);
+            k[1]=FIELD(cmd[0],4,9);
+            k[2]=(FIELD(cmd[0],0,4)<<5)|FIELD(cmd[1],27,5);
+            k[3]=FIELD(cmd[1],18,9);
+            for(i=0;i<4;i++) rst.kyuv[i]=(k[i]&0x100)?k[i]-0x200:k[i];
+        }
         rst.k4=FIELD(cmd[1],9,9)/255.0f;
         rst.k5=FIELD(cmd[1],0,9)/255.0f;
         rst.modechange=2;
-        logd(" K4 %.2f K5 %.2f (YUV conversion not emulated)",rst.k4,rst.k5);
+        logd(" K0 %i K1 %i K2 %i K3 %i K4 %.2f K5 %.2f",
+            rst.kyuv[0],rst.kyuv[1],rst.kyuv[2],rst.kyuv[3],rst.k4,rst.k5);
         break;
     case 0xeb: // RDP_SETKEYR
         logd("!skiprdp key r (not emulated)");
@@ -6935,6 +7246,7 @@ void rdp_framestart(void)
     rawshade=0; // a display list, unless rdp_rawcmd says otherwise
     if(rst.frameopen) return;
     rst.frameopen=1;
+    rst.framecbuf=0;
 
     rst.firstfillrect=1;
 

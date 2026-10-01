@@ -9,6 +9,8 @@ extern "C" {
 void    hw_init(void);
 
 void    hw_check(void);
+void    hw_si_later(dword m_queue); // HLE: a controller message after the SI delay
+void    hw_si_flush(void);          // deliver the pending ones now
 // these in cpu.c temporarily
 void    hw_retrace(void);
 void    hw_gfxframedone(void);

@@ -1037,6 +1037,59 @@ void envmix_mario(int src,int dst1,int dst2,int eff1,int eff2,int cnt)
     sst.env_rttar=rttar>>1;
 }
 
+// LLE plays the frames a sound list mixes (see interleave below). A naudio
+// list can mix a frame twice: the speech player of the Elmo games (Factor 5)
+// appends a pass that interleaves the speech alone, mixes the saved frame
+// over it and saves the sum to the frame's own output buffer. Played at
+// every INTERLEAVE that was a music frame, a music frame, a speech frame, a
+// speech frame: twice the sound, the speech slow and chopped. A naudio
+// list's frames wait here until its end: a SAVEBUFF to a frame's buffer
+// replaces the frame, and the INTERLEAVE before it was a step, not a frame.
+#define NFRAME_MAX   16
+#define NFRAME_BYTES 0x2e0
+
+static struct
+{
+    int   on;                 // collecting: a naudio list in LLE
+    int   n;
+    dword addr[NFRAME_MAX];   // the RDRAM buffer it was saved to, 0: not yet
+    short data[NFRAME_MAX][NFRAME_BYTES/2];
+} nframe;
+
+static void lle_playframe(short *data,int bytes)
+{
+    st2.audiorequest=1;
+    sound_add(data,bytes);
+    st2.sync_soundadd+=bytes;
+    st.samples+=bytes/4;
+}
+
+// SAVEBUFF of len bytes at DMEM dst to RDRAM addr
+static void nframe_saved(int dst,dword addr,int len)
+{
+    int i,last=nframe.n-1;
+    if(!nframe.on || dst!=0 || len!=NFRAME_BYTES || last<0 || !addr) return;
+    for(i=0;i<nframe.n;i++) if(nframe.addr[i]==addr) break;
+    if(i<nframe.n)
+    { // mixed again and saved over
+        memcpy(nframe.data[i],sst.mem,NFRAME_BYTES);
+        if(!nframe.addr[last]) nframe.n--;
+    }
+    else if(!nframe.addr[last])
+    {
+        nframe.addr[last]=addr;
+        memcpy(nframe.data[last],sst.mem,NFRAME_BYTES);
+    }
+}
+
+static void nframe_play(void)
+{
+    int i;
+    for(i=0;i<nframe.n;i++) lle_playframe(nframe.data[i],NFRAME_BYTES);
+    nframe.n=0;
+    nframe.on=0;
+}
+
 void interleave(int dst,int left,int right,int cnt)
 {
     int i,a;
@@ -1083,10 +1136,12 @@ void interleave(int dst,int left,int right,int cnt)
     // crackled, and refusing it froze Nuclear Strike.
     if(st.lleos && st.soundenable)
     {
-        st2.audiorequest=1;
-        sound_add(sst.mem+dst,cnt*2*2);
-        st2.sync_soundadd+=cnt*2*2;
-        st.samples+=cnt;
+        if(nframe.on && nframe.n<NFRAME_MAX && cnt*2*2==NFRAME_BYTES)
+        { // naudio: played at the end of the list (nframe_play)
+            memcpy(nframe.data[nframe.n],sst.mem+dst,NFRAME_BYTES);
+            nframe.addr[nframe.n++]=0;
+        }
+        else lle_playframe(sst.mem+dst,cnt*2*2);
     }
     sst.lastinterleave=cnt*4;
     loga("\n+interleave; added %i samples",cnt);
@@ -1405,6 +1460,7 @@ case 0x6: // SAVEBUFF
         dword addr=cmd[1]+sst.segment;
         if(st.dumpsnd) loga("%04X (%03X) -> %08X",dst,len,addr);
         savemem(dst,addr,len);
+        nframe_saved(dst,addr,len);
         if(KOE && lastc==0xD) print("--interleave %08X\n",cmd[1]);
     } break;
 case 0x1: // ADPCM
@@ -2188,7 +2244,10 @@ void slist_execute(OSTask_t *task)
     if(cart.slist_type==2)
     {
         loga("Using Banjo rspcode\n");
+        nframe.on=st.lleos;
+        nframe.n=0;
         slist_banjo(task);
+        nframe_play();
     }
     else if(cart.slist_type==1)
     {

@@ -385,7 +385,15 @@ void pad_mouse(void)
     mypad.sticky=sy;
 }
 
-void pad_drawframe(void)
+// The controller is read once for every frame the game finishes
+// (pad_drawframe). A game that draws with its CPU finishes none: Namco Museum
+// 64 sends no graphics task at all, its buttons stayed zero, and nothing got
+// past its Controller Pak prompt. After PAD_QUIET retraces without a frame
+// the controller is read at every retrace instead (pad_frame).
+#define PAD_QUIET 6
+static int padquiet; // retraces since the last finished frame
+
+static void pad_sample(void)
 {
     if(!rdp_gfxactive() || st.keyboarddisable)
     {
@@ -428,9 +436,17 @@ void pad_drawframe(void)
     if(mypad.sticky<-80) mypad.sticky=-80;
 }
 
+void pad_drawframe(void)
+{
+    padquiet=0;
+    pad_sample();
+}
+
 void pad_frame(void)
 {
     autocount++;
+    if(padquiet<PAD_QUIET) padquiet++;
+    else pad_sample();
 }
 
 dword pad_getdata(int pad)

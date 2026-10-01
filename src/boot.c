@@ -56,6 +56,22 @@ void boot_boot(void)
             mem_write32(0xA0000004+(a-0x554),mem_read32(0x10000000+a));
     }
 
+    // The 6106 one is IPL3 0x4F0..0x7AB (175 words) at RDRAM 0, encrypted in
+    // the ROM: each word is XORed with a key that starts at seed*0x260BCD5+1
+    // (the 6106 seed is 0x85) and is multiplied by 0x260BCD5 per word (N64-IPL
+    // ipl3.s, load_ipl3 for IPL3_X106). Cruis'n World's start-up compares
+    // four of its words (RDRAM 0x164, 0x1BC, 0x234, 0x2B8) and stops in an
+    // endless loop at 802E0D98 when one differs: no thread ever drew anything
+    if(cart.cic==6106)
+    {
+        dword key=0x85u*0x260BCD5u+1;
+        for(a=0x4F0;a<0x7AC;a+=4)
+        {
+            mem_write32(0xA0000000+(a-0x4F0),mem_read32(0x10000000+a)^key);
+            key*=0x260BCD5u;
+        }
+    }
+
     // what IPL3 leaves in low memory, HLE and LLE alike (decompals N64-IPL
     // ipl3.s): osTvType from the PIF (Mupen64Plus get_tv_type, by the header
     // country code), osVersion 0 as in Mupen64Plus, osCicId only from the
@@ -126,9 +142,11 @@ void boot_boot(void)
     cart.codesize=0x100000; // guess, always same?
 
     // CIC-6103 boot code (Paper Mario, Banjo-Kazooie) loads the game 1MB
-    // below the header entry point
+    // below the header entry point, CIC-6106 (F-Zero X, Yoshi's Story,
+    // Cruis'n World) 2MB below it
     print("CIC-%i. ",cart.cic);
     if(cart.cic==6103) cart.codebase-=0x100000;
+    if(cart.cic==6106) cart.codebase-=0x200000;
 
     if(cart.codesize>4096*1024)
     {
@@ -141,7 +159,11 @@ void boot_boot(void)
     if(cart.bootloader==1)
     {
         print("Alternate boot loader. ");
-        cart.codebase&=~0x300000; // fzero
+        // an IPL3 the sum above doesn't know (PAL chips): the old guess,
+        // right while the game loads below 1MB. A known chip has its exact
+        // offset: Cruis'n World's header says 804AD400, which the mask left
+        // alone, above the 4MB of RDRAM, and the game never started
+        if(cart.cic!=6103 && cart.cic!=6106) cart.codebase&=~0x300000;
     }
 
     uint32_t pc = 0;

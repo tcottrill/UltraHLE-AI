@@ -133,6 +133,7 @@ void cpu_clearstate2(void)
     {
         os_event(OS_EVENT_SP);
     }
+    hw_si_flush(); // and a delayed SI message
     memset(&st2,0,sizeof(st2));
 
     st.us_gfx=0;

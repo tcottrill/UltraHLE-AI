@@ -4,8 +4,47 @@
 
 void hw_sp_check(void);
 
+// HLE OS: the message of osContStartReadData/osContStartQuery comes a while
+// after the call, as the SI interrupt does on the console (and as lle.h
+// SI_DELAY). Cruis'n USA's main thread spins on a flag that one thread sets
+// before it starts a controller read and another clears when the message
+// arrives. Both have a higher priority, so with the message there at once
+// they ran back to back, the flag was never seen set, and the game stayed on
+// its copyright screen. Longer than two of the HLE scheduler's slices
+// (CYCLES_CHECKOFTEN): threads only switch at their ends, and a message due
+// at the first one still came before the main thread had run.
+#define SI_HLE_DELAY (2*CYCLES_CHECKOFTEN+2000)
+#define SI_HLE_MAX   8
+static int   si_hle_pending;
+static dword si_hle_queue[SI_HLE_MAX];
+static qword si_hle_due;
+
+// pending messages now: the delay is over, or emulation stops (a state saved
+// with one in flight would wait for it forever)
+void hw_si_flush(void)
+{
+    int i,n=si_hle_pending;
+    si_hle_pending=0;
+    for(i=0;i<n;i++)
+    {
+        if(si_hle_queue[i]) osSendMesg(si_hle_queue[i],0,-1);
+        else os_event(OS_EVENT_SI);
+    }
+}
+
+// a message (0) for this queue once the SI would be done; queue 0 is the
+// SI event itself (the game's own controller code wrote the SI registers)
+void hw_si_later(dword m_queue)
+{
+    if(si_hle_pending>=SI_HLE_MAX) hw_si_flush();
+    si_hle_queue[si_hle_pending++]=m_queue;
+    si_hle_due=st.cputime+SI_HLE_DELAY;
+}
+
 void hw_checkoften(void)
 {
+    if(si_hle_pending && st.cputime>=si_hle_due) hw_si_flush();
+
     // a gfxtime task ends here too: a game waiting for its message
     // touches no register (hw_memio)
     if(cart.gfxtime>0) hw_sp_check();
@@ -653,7 +692,8 @@ void hw_si_pads(int write)
     RSI[0]=WSI[0];
     RSI[6]=0; // not busy
 
-    os_event(OS_EVENT_SI);
+    if(st.lleos) os_event(OS_EVENT_SI);
+    else hw_si_later(0);
 }
 
 /********************************************************************
@@ -666,6 +706,7 @@ void hw_si_pads(int write)
 void hw_init(void)
 {
     dp_hle_pending=0;
+    si_hle_pending=0;
     // init reg data we don't want to be 0 (default init value)
     WSI[1]=NULLFILL;
     WSI[4]=NULLFILL;

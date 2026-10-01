@@ -49,6 +49,7 @@ static struct
 } ai;
 
 static void lle_raise(dword bit,int delay);
+static void lle_sireaddone(void);
 static qword lle_now(void);
 
 // countperop games: the CPU runs in step with real time, so a buffer ends
@@ -268,6 +269,7 @@ int lle_sptaskpending(void)
 static void lle_irqfired(dword bit)
 {
     if(bit==MI_PI) RPI[4]=(RPI[4]&~1u)|8u;
+    if(bit==MI_SI) lle_sireaddone();
     if(bit==MI_SP && lle_sptaskdone)
     {
         lle_sptaskdone=0;
@@ -909,6 +911,31 @@ void lle_tlbp(void)
 ** PIF (controllers) and SI
 */
 
+// A PIF -> RDRAM transfer reaches RDRAM when it is done, with the SI
+// interrupt, not when it is started. libultra fills its buffer with 0xFF
+// words (in the D-cache), starts the read and calls osInvalDCache on the
+// buffer, which writes a partly covered first and last cache line back to
+// RDRAM before dropping them. On the console the PIF data lands after that.
+// Copied at the start, the write-back went over it: Bottom of the 9th's
+// buffer is at 80072F88, half way into a line, so its first 8 bytes, the
+// first controller's reply, came back as the fill (no buttons, stick y -1)
+// and the game never saw Start. Other games' buffers start on a line.
+static dword si_readdram; // RDRAM address of the read in flight, 0: none
+
+static void lle_sireaddone(void)
+{
+    int i;
+    if(!si_readdram) return;
+    // the devices answer when the game reads PIF RAM back (Mupen64Plus
+    // dma_si_read -> update_pif_ram): libultra writes the read-buttons
+    // block once and then only reads, every frame, so answering only
+    // on the write froze the pad at its first state
+    pif_read(0);
+    for(i=0;i<16;i++) mem_write32(si_readdram+i*4,RPIF[0x1f0+i]);
+    si_readdram=0;
+    RSI[6]&=~1u; // not busy
+}
+
 // joybus commands run in pif.c (shared with HLE mode)
 static void lle_si(int topif)
 {
@@ -919,6 +946,9 @@ static void lle_si(int topif)
         print("note: first pad access\n");
         cart.first_pad=1;
     }
+    lle_sireaddone(); // a read still in flight first: PIF RAM is about to change
+    RSI[0]=WSI[0];
+    RSI[6]=0; // not busy
     if(topif)
     {
         for(i=0;i<16;i++) RPIF[0x1f0+i]=mem_read32(dram+i*4);
@@ -926,15 +956,9 @@ static void lle_si(int topif)
     }
     else
     {
-        // the devices answer when the game reads PIF RAM back (Mupen64Plus
-        // dma_si_read -> update_pif_ram): libultra writes the read-buttons
-        // block once and then only reads, every frame, so answering only
-        // on the write froze the pad at its first state
-        pif_read(0);
-        for(i=0;i<16;i++) mem_write32(dram+i*4,RPIF[0x1f0+i]);
+        si_readdram=dram; // copied in lle_irqfired
+        RSI[6]|=1u;       // DMA busy until then
     }
-    RSI[0]=WSI[0];
-    RSI[6]=0; // not busy
     lle_raise(MI_SI,SI_DELAY);
 }
 
@@ -1403,7 +1427,10 @@ void lle_event(int ev)
                 rdp_showvi(RVI[1],RVI[2]&0xfff,h,(RVI[0]&3)==3?4:2);
             }
         }
-        else if((RVI[0]&3)>=2 && init.viewporthig)
+        // not while the game has the screen black (osViBlack: H_VIDEO 0).
+        // Perfect Dark blacks it out to load its intro and uses the frame
+        // buffers as work memory meanwhile: a second of static was shown.
+        else if((RVI[0]&3)>=2 && init.viewporthig && RVI[9])
             rdp_cpupicture(RVI[1],RVI[2]&0xfff,init.viewporthig,(RVI[0]&3)==3?4:2);
         lle.vis++;
         RVI[4]=0;
@@ -1499,6 +1526,7 @@ void lle_load(FILE *f1)
         return;
     }
     fread(&lle,1,sizeof(lle),f1);
+    si_readdram=0; // not in the state: a read in flight is lost, the next one comes a frame later
     if(st.lleos)
     { // mapped segments as at boot (miss pages), then the saved TLB on top
         tlb_defaultall();
@@ -1514,6 +1542,7 @@ void lle_load(FILE *f1)
 void lle_decide(int important,int importanttotal,int hasrescan)
 {
     memset(&lle,0,sizeof(lle));
+    si_readdram=0;
     cache_reset();
     cpu_pc64=0;
     memset(&ai,0,sizeof(ai));

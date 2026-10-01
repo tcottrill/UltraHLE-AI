@@ -107,6 +107,26 @@ int main_executing(void)
     return(st.executing);
 }
 
+// Waits up to ms for the emulation thread, letting its SendMessage calls
+// through. That thread writes the status bar counters and the log list with
+// SendMessage, which only returns once this (the window) thread takes the
+// message; a plain Sleep here left it stuck in the call, where it never saw
+// the break. Top Gear Overdrive (no idle time, counters sent every frame):
+// F6 stopped the game, timed out and saved nothing.
+static void main_wait(int ms)
+{
+    MSG   msg;
+    DWORD start=GetTickCount();
+    for(;;)
+    {
+        int left=ms-(int)(GetTickCount()-start);
+        // sent messages only: posted ones stay queued for the message loop
+        PeekMessage(&msg,NULL,0,0,PM_NOREMOVE|PM_QS_SENDMESSAGE);
+        if(left<=0) break;
+        MsgWaitForMultipleObjects(0,NULL,FALSE,left>10?10:left,QS_SENDMESSAGE);
+    }
+}
+
 // starts execution (might take a while)
 int main_start(void)
 {
@@ -129,7 +149,7 @@ int main_start(void)
     for(i=0;i<500;i+=10)
     {
         if(st.executing) return(0);
-        Sleep(10);
+        main_wait(10);
     }
 
     // execution did not start (emu stuck?)
@@ -154,29 +174,27 @@ int main_stop(void)
     }
 
     // first try a nice break (wait up to 0.5 sec)
-    for(i=0;i<5;i++)
+    for(i=0;i<50;i++)
     {
         st.nicebreak=1;
-        Sleep(0);
+        main_wait(10);
         if(!main_executing())
         {
             SetThreadPriority(emuthreadhandle,THREAD_PRIORITY_NORMAL);
             return(0);
         }
-        Sleep(100);
     }
 
     // emulation pretty stuck, do a more forceful break (wait 1 sec)
-    for(i=0;i<10;i++)
+    for(i=0;i<100;i++)
     {
         cpu_break();
-        Sleep(0);
+        main_wait(10);
         if(!main_executing())
         {
             SetThreadPriority(emuthreadhandle,THREAD_PRIORITY_NORMAL);
             return(0);
         }
-        Sleep(100);
     }
 
     // problems, emulation is really hung up :(
@@ -201,7 +219,9 @@ char *main_command(char *cmd,...)
     {
         if(main_stop())
         {
-            // coulnd't stop, fatal error
+            // coulnd't stop, fatal error; said in the log (a quicksave
+            // dropped here used to leave no trace at all)
+            print("note: emulation did not stop, '%s' was not run\n",cmd);
             cmderrs=3;
             return("exception(00000000): Cannot stop execution");
         }

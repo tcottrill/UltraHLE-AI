@@ -1349,6 +1349,13 @@ static void cmd_rspgfx(std::vector<std::string>& args)
     print("rspgfx: %i\n", cart.rspgfx);
 }
 
+// rspaudio 0|1: audio tasks on the RSP interpreter, as the ini's rspaudio=
+static void cmd_rspaudio(std::vector<std::string>& args)
+{
+    cart.rspaudio = atoi(param(1, args));
+    print("rspaudio: %i\n", cart.rspaudio);
+}
+
 static void cmd_clearosinfo(std::vector<std::string>& args)
 {
     os_clearthreadtime();
@@ -1504,6 +1511,7 @@ void cmd_init()
     cmds["sample"] = cmd_sample;
     cmds["countperop"] = cmd_countperop;
     cmds["rspgfx"] = cmd_rspgfx;
+    cmds["rspaudio"] = cmd_rspaudio;
     cmds["gfxtime"] = cmd_gfxtime;
     cmds["clearosinfo"] = cmd_clearosinfo;
     cmds["emptyq"] = cmd_emptyq;

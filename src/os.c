@@ -403,7 +403,7 @@ int os_queuecheck(int id)
 
 void  osCreateMesgQueue(dword m_queue,dword m_mesg,dword size)
 {
-    int id,i;
+    int id,i,again=0;
 
     // find if queue already exits
     for(i=1;i<queuenum;i++)
@@ -411,6 +411,7 @@ void  osCreateMesgQueue(dword m_queue,dword m_mesg,dword size)
         if(m_queue==queue[i].memaddr)
         {
             id=i;
+            again=1;
             break;
         }
     }
@@ -444,6 +445,21 @@ void  osCreateMesgQueue(dword m_queue,dword m_mesg,dword size)
         return;
     }
     logo(BLUE"CreateMesgOSQueue %08X (%i)\n",m_queue,id);
+    if(again)
+    {
+        // A queue created again has empty wait lists (libultra resets
+        // mtqueue/fullqueue): a thread that was blocked on it is no longer
+        // woken by its messages, only by osStartThread. Big Mountain 2000
+        // sets its SI queue up again before the menu while its controller
+        // thread waits on it, then reads the pak through that queue; the
+        // controller thread took the main thread's SI message and the game
+        // stopped on a black screen.
+        for(i=1;i<MAXTHREAD;i++)
+        {
+            if(thread[i].recvblock==id) thread[i].recvblock=0;
+            if(thread[i].sendblock==id) thread[i].sendblock=0;
+        }
+    }
     queue[id].memaddr=m_queue;
     queue[id].size=size;
     queue[id].num=0;
@@ -554,8 +570,9 @@ static void os_pidone(dword m_queue)
 #define PI_DMA_PERBYTE  8    // and per byte transferred
 #define MAXPIDMA        32
 
-static struct { dword m_queue; qword due; } pidma[MAXPIDMA];
+static struct { dword m_queue; qword due; int retrace; } pidma[MAXPIDMA];
 static int pidmanum;
+static int piretraces; // retraces so far (os_piretrace)
 
 static void os_pischedule(dword m_queue,int nbytes)
 {
@@ -567,7 +584,29 @@ static void os_pischedule(dword m_queue,int nbytes)
     }
     pidma[pidmanum].m_queue=m_queue;
     pidma[pidmanum].due=st.cputime+PI_DMA_LATENCY+(qword)nbytes*PI_DMA_PERBYTE;
+    pidma[pidmanum].retrace=piretraces;
     pidmanum++;
+}
+
+// A retrace: the DMAs started before the one before it are done now, whatever
+// the emulated clock says. Retraces come by the host's clock and a DMA's time
+// by emulated instructions, so on a slow host (the debug build, dump mode, a
+// stop and go) two retraces passed before a 2K sample load was "done". Cruis'n
+// USA's sound driver takes its DMA messages at the next audio frame, two
+// retraces on, and halts the game when one is missing ("WESS ERROR
+// DMANOTDONE"); a 147K track load in front of them did the same in the debug
+// build. A whole frame of latency is left, as much as hardware ever takes for
+// a sample load.
+static void os_piretrace(void)
+{
+    piretraces++;
+    while(pidmanum>0 && pidma[0].retrace<=piretraces-2)
+    {
+        dword m_queue=pidma[0].m_queue;
+        memmove(pidma,pidma+1,sizeof(pidma[0])*(pidmanum-1));
+        pidmanum--;
+        os_pidone(m_queue);
+    }
 }
 
 static void os_pipending(void) // from os_timers
@@ -720,6 +759,7 @@ void os_event(dword ev)
         exception("event too large");
         return;
     }
+    if(ev==OS_EVENT_RETRACE) os_piretrace(); // overdue PI DMAs first
     qid=event[ev].queueid;
     if(qid)
     {
@@ -1341,7 +1381,7 @@ int osContStartReadData(dword m_queue)
 {
     logo(BLUE"osContStartReadData\n");
     //print(BLUE"osContStartReadData\n");
-    osSendMesg(m_queue,0,-1);
+    hw_si_later(m_queue); // not at once: see hw.c
     return(0);
 }
 
@@ -1357,7 +1397,7 @@ int osContStartQuery(dword m_queue)
     static int cnt;
     logo(BLUE"osContStartQuery\n");
     //print(BLUE"osContStartQuery\n");
-    osSendMesg(m_queue,0,-1);
+    hw_si_later(m_queue);
     /*
     if(cart.iszelda)
     {
@@ -1592,7 +1632,7 @@ void os_taskhacks(int idling)
             loopcnt++;
             if(loopcnt>10000)
             {
-                print("waiting in a loop; Emulation seems stuck.\n");
+                print("waiting in a loop (thread %i, pc %08X); Emulation seems stuck.\n",st.thread,(dword)st.pc);
                 loopcnt=0;
             }
         }
