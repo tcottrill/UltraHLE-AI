@@ -13,6 +13,7 @@ typedef struct
     float s1,t1;
     float s2,t2;
     float zs;           // screen depth 0..1, or <0: depth from w (see the shader)
+    float c1[4];        // texture 1 sampled inside s,t min..max only; min>max: off
 } xgl_vertex;
 
 #define XGL_BATCHVX (3*4096)  // vertices per draw call

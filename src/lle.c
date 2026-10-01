@@ -1403,6 +1403,8 @@ void lle_event(int ev)
                 rdp_showvi(RVI[1],RVI[2]&0xfff,h,(RVI[0]&3)==3?4:2);
             }
         }
+        else if((RVI[0]&3)>=2 && init.viewporthig)
+            rdp_cpupicture(RVI[1],RVI[2]&0xfff,init.viewporthig,(RVI[0]&3)==3?4:2);
         lle.vis++;
         RVI[4]=0;
         lle_raise(MI_VI,0);

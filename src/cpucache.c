@@ -402,6 +402,27 @@ void cache_flushall(void)
     }
 }
 
+// Exchange the dirty lines in physical lo..hi with RAM's words: the frame
+// buffer a game's CPU draws in is shown from RAM (rdp_cpupicture), and its
+// newest pixels are still here. A second call puts both back, so the cache
+// is as the game left it.
+void cache_swapdirty(dword lo,dword hi)
+{
+    int i,j;
+    for(i=0;i<512;i++)
+    {
+        DLine *l=&dcache[i];
+        dword  base=dline_addr(l);
+        if(!(l->tag&1) || !l->dirty || base+16<=lo || base>=hi) continue;
+        for(j=0;j<4;j++)
+        {
+            dword t=ram_read(base+j*4);
+            ram_write(base+j*4,l->w[j]);
+            l->w[j]=t;
+        }
+    }
+}
+
 void cache_reset(void)
 {
     memset(dcache,0,sizeof(dcache));

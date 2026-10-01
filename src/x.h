@@ -53,6 +53,8 @@ typedef struct
     float t2s,t2t,t2w;
     float zs;        // screen depth 0..1 for this vertex; <0 = from w.
                      // x_vx uses it once and sets it back to -1
+    int   t1clamp;   // texture 1 is sampled inside t1c only (x_vxtexclamp).
+    float t1c[4];    // s,t min and s,t max; x_vx uses it once and clears it
 } xt_data;
 
 typedef struct
@@ -422,6 +424,7 @@ EXPORT void    x_vxarray(xt_pos *pos,int size,char *mask);
 #define x_vxtexp(zs,zt,zw)       g_data.t1s=(zs), g_data.t1t=(zt), g_data.t1w=(zw)
 #define x_vxtex2(zs,zt)          g_data.t2s=(zs), g_data.t2t=(zt)
 #define x_vxdepth(z)             g_data.zs=(z)
+#define x_vxtexclamp(s0,t0,s1,t1) g_data.t1clamp=1, g_data.t1c[0]=(s0), g_data.t1c[1]=(t0), g_data.t1c[2]=(s1), g_data.t1c[3]=(t1)
 #define x_vxtex2v(st)            g_data.t2s=((float *)(st))[0], g_data.t2t=((float *)(st))[1]
 #define x_vxpos(zx,zy,zz)        g_pos.x=(zx), g_pos.y=(zy), g_pos.z=(zz), x_vx(&g_pos,&g_data)
 #define x_vxposv(xyz)            x_vx((xyz),&g_data)

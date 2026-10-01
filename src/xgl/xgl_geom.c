@@ -24,6 +24,8 @@ int xgl_geom_create(void)
     glVertexAttribPointer(3,2,GL_FLOAT,GL_FALSE,sizeof(xgl_vertex),(void *)offsetof(xgl_vertex,s2));
     glEnableVertexAttribArray(4);
     glVertexAttribPointer(4,1,GL_FLOAT,GL_FALSE,sizeof(xgl_vertex),(void *)offsetof(xgl_vertex,zs));
+    glEnableVertexAttribArray(5);
+    glVertexAttribPointer(5,4,GL_FLOAT,GL_FALSE,sizeof(xgl_vertex),(void *)offsetof(xgl_vertex,c1));
     xg.batchn=0;
     return 1;
 }
@@ -238,6 +240,9 @@ void x_vx(xt_pos *p,xt_data *d)
     v.s2=d->t2s; v.t2=d->t2t;
     v.zs=d->zs;
     d->zs=-1.0f; // per vertex: the next one takes its depth from w again
+    if(d->t1clamp) memcpy(v.c1,d->t1c,sizeof(v.c1));
+    else { v.c1[0]=v.c1[1]=1.0f; v.c1[2]=v.c1[3]=0.0f; }
+    d->t1clamp=0;
     xgl_stats.in_vx++;
 
     n=assemble(&xg.as,&v,out);

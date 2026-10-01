@@ -9,12 +9,14 @@ static const char *vs_src=
 "layout(location=2) in vec2 a_tex1;\n"
 "layout(location=3) in vec2 a_tex2;\n"
 "layout(location=4) in float a_zs;\n"            // screen depth 0..1, <0: from w
+"layout(location=5) in vec4 a_clamp1;\n"         // texture 1 sampled inside xy..zw
 "uniform float u_deptha;\n"
 "uniform float u_depthb;\n"
 "noperspective out vec4 v_col;\n"                // Glide iterates color in screen space
 "out vec2  v_tex1;\n"
 "out vec2  v_tex2;\n"
 "out float v_w;\n"
+"flat out vec4 v_clamp1;\n"
 "void main()\n"
 "{\n"
 "    float w=a_pos.z;\n"
@@ -27,6 +29,7 @@ static const char *vs_src=
 "    v_tex1=a_tex1;\n"
 "    v_tex2=a_tex2;\n"
 "    v_w=w;\n"
+"    v_clamp1=a_clamp1;\n"
 "}\n";
 
 static const char *fs_src=
@@ -55,6 +58,7 @@ static const char *fs_src=
 "in vec2  v_tex1;\n"
 "in vec2  v_tex2;\n"
 "in float v_w;\n"
+"flat in vec4 v_clamp1;\n"
 "uniform sampler2D u_tex1;\n"
 "uniform sampler2D u_tex2;\n"
 "uniform int   u_rgbmode;\n"
@@ -122,9 +126,18 @@ static const char *fs_src=
 "    return clamp(vec4(rgb,a),0.0,1.0);\n"
 "}\n"
 "\n"
+// A texture rectangle's coordinates stay inside what the RDP samples for it
+// (x_vxtexclamp): drawn larger than 1x, the filter at its last column and row
+// took in the texel past them, the next cell of an atlas.
+"vec2 tc1()\n"
+"{\n"
+"    if(v_clamp1.x>v_clamp1.z) return v_tex1;\n"
+"    return clamp(v_tex1,v_clamp1.xy,v_clamp1.zw);\n"
+"}\n"
+"\n"
 "vec4 texel()\n"                                // grTexCombine on TMU0, fx.c ~577-616
 "{\n"
-"    vec4 t1=texture(u_tex1,v_tex1);\n"
+"    vec4 t1=texture(u_tex1,tc1());\n"
 "    vec4 t2=texture(u_tex2,v_tex2);\n"
 "    vec4 t;\n"
 "    if(u_texmode==X_ADD)         t=t2+t1;\n"               // SCALE_OTHER_ADD_LOCAL, ONE
@@ -180,7 +193,7 @@ static const char *fs_src=
 "    if(u_n64cyc>0)\n"
 "    {\n"
 "        vec4 r;\n"
-"        g_t0=texture(u_tex1,v_tex1);\n"
+"        g_t0=texture(u_tex1,tc1());\n"
 "        g_t1=texture(u_tex2,v_tex2);\n"
 "        r=cycle(u_cc0,u_ac0,vec4(0.5));\n"
 "        if(u_n64cyc>1) r=cycle(u_cc1,u_ac1,r);\n"

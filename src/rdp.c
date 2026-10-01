@@ -718,6 +718,7 @@ Primitive *newpr(void)
         rst.last_prtabi=0;
     }
     i=rst.prtabi++;
+    rst.prtab[i].clamp=0;
     return(rst.prtab+i);
 }
 
@@ -1903,6 +1904,18 @@ void txt_fromcbuf(byte *buf,Tile *t)
 
 #define SWAP(s,d) sd=s,s=d,d=sd
 
+// rows of the tile's line in the TMEM load it starts in; 0 when no load is
+// known there
+static int txt_loadedrows(Tile *t)
+{
+    int k=(t->tmembase>>3)&511,j,len;
+    if(t->tmemrl<=0) return(0);
+    for(j=k;j>=0 && !rst.tmemlen[j];j--);
+    if(j<0) return(0);
+    len=j*8+rst.tmemlen[j]-k*8;
+    return(len>0?len/t->tmemrl:0);
+}
+
 // texels a clamped tile repeats across itself when its wrap mask is smaller
 // than the tile (clamp applies at the tile edge, the mask inside it);
 // 0 when the whole tile is used
@@ -1964,8 +1977,17 @@ void txt_masksize(Tile *t,dword *cmd)
         if(line>0 && w>line) w=line;
         if(w>ws) cmd[1]=(cmd[1]&~(0x3ff<<14))|((FIELD(cmd[0],14,10)+w-1)<<14);
     }
+    // The height stops at the rows the tile's load put into TMEM: the ones
+    // below hold another texture. International Superstar Soccer 2000 draws
+    // its logos as 32x32 pieces, mirror with mask 9, each followed in RDRAM
+    // by its palette. Built 512 rows high, a piece's last row was filtered
+    // with the palette's bytes, a dashed line along every piece.
     if(!(t->cmt&2) && t->maskt && t->maskt<=10 && (1<<t->maskt)>wt)
-        cmd[1]=(cmd[1]&~(0x3ff<<2))|((FIELD(cmd[0],2,10)+(1<<t->maskt)-1)<<2);
+    {
+        int h=1<<t->maskt,rows=txt_loadedrows(t);
+        if(rows>0 && h>rows) h=rows;
+        if(h>wt) cmd[1]=(cmd[1]&~(0x3ff<<2))|((FIELD(cmd[0],2,10)+h-1)<<2);
+    }
 }
 
 // repeats the mx*my texels in src across dx*dy, mirroring every other copy
@@ -2598,6 +2620,11 @@ void drawprims(int p,int i0,int i1)
                     x_vxcolor4(vx->cc[0],vx->cc[1],vx->cc[2],vx->cc[3]);
                 }
                 x_vxtex   (vx->ct[0],vx->ct[1]);
+                if(pr->clamp)
+                    x_vxtexclamp((pr->tclamp[0]+rst.txt_uadd)*rst.txt_uscale,
+                                 (pr->tclamp[1]+rst.txt_vadd)*rst.txt_vscale,
+                                 (pr->tclamp[2]+rst.txt_uadd)*rst.txt_uscale,
+                                 (pr->tclamp[3]+rst.txt_vadd)*rst.txt_vscale);
                 x_vxdepth(vx->zs);
                 x_vxposv  ((xt_pos *)vx->pos);
             }
@@ -2641,6 +2668,11 @@ static void drawprims_n64(int i0,int i1)
             }
             if(!j || !rst.flat) x_vxcolor4(c[0],c[1],c[2],c[3]);
             x_vxtex (vx->ct[0],vx->ct[1]);
+            if(pr->clamp)
+                x_vxtexclamp((pr->tclamp[0]+rst.txt_uadd)*rst.txt_uscale,
+                             (pr->tclamp[1]+rst.txt_vadd)*rst.txt_vscale,
+                             (pr->tclamp[2]+rst.txt_uadd)*rst.txt_uscale,
+                             (pr->tclamp[3]+rst.txt_vadd)*rst.txt_vscale);
             x_vxtex2((vx->tex[0]+rst.txt_uadd2)*rst.txt_uscale2,
                      (vx->tex[1]+rst.txt_vadd2)*rst.txt_vscale2);
             x_vxdepth(vx->zs);
@@ -2706,6 +2738,15 @@ void flushprims(void)
             // compare value is coverage*32 (ares parallel-rdp combiner.h):
             // 255 inside a triangle, so only edge pixels could fail
             x_alphatest(1.0); // off
+        }
+        else if(rst.s_alphatst==1 && rst.s_cycles<=2)
+        {
+            // threshold compare: a pixel is kept when its alpha is at least
+            // the blend color's (0 keeps them all). International Superstar
+            // Soccer 2000 sets 1 for its anti-aliased I4 font; cut at a fixed
+            // 0.25, only the letters' brightest texels were left, as dots.
+            int t=rst.col[C_BLEND][3];
+            x_alphatest(t>0?(t-0.5f)/256.0f:1.0f);
         }
         else if(rst.s_alphatst==4 ||
           (rst.s_alphatst==1))// && rst.colf[C_BLEND][3]>0.1))
@@ -3091,11 +3132,29 @@ void rdp_fillrect(TexRect *tr)
     st2.gfx_tris+=2;
 }
 
+// The s (or t) values the RDP samples for a texture rectangle w pixels wide
+// that starts at s0 and steps ds a pixel (1/32 texels): lo..hi. Point sampled,
+// each sample is a whole texel, counted from the tile's origin org.
+void txt_rectrange(float s0,float ds,float w,float org,int point,float *lo,float *hi)
+{
+    float a=s0,b=w>1.0f?s0+(w-1.0f)*ds:s0,t;
+    if(a>b) t=a,a=b,b=t;
+    if(point)
+    {
+        a=org+32.0f*floorf((a-org)/32.0f);
+        b=org+32.0f*floorf((b-org)/32.0f);
+    }
+    *lo=a;
+    *hi=b;
+}
+
 void rdp_texrect(TexRect *tr)
 {
     Primitive *p,*p2;
     Vertex *v;
     float u0,u1,v0,v1;
+    float cl[4];
+    int   clamp=0;
 
     // into the z-buffer: a depth mask, not a picture. Smash Bros draws the
     // round mask of its off-screen bubble there; on screen it was a black
@@ -3167,6 +3226,22 @@ void rdp_texrect(TexRect *tr)
         v0=tr->t0-0.5f*dt;
         u1=tr->s0+(tr->x0-tr->x1-0.5f)*ds;
         v1=tr->t0+(tr->y0-tr->y1-0.5f)*dt;
+        // The RDP samples once a pixel, from s0 to s0+(w-1)*ds. Drawn larger,
+        // the pixels in between must stay inside that too: filtered, the
+        // last column and row took in the texel after them. International
+        // Superstar Soccer 2000 cuts its logos and its 8x8 font out of small
+        // atlases, and every piece and letter had a line of the next cell on
+        // its right. Unshifted tiles only, as below.
+        {
+            Tile *t=TEXTILE(0);
+            if(!t->shifts && !t->shiftt)
+            {
+                int point=!(rst.s_txtfilt&2);
+                txt_rectrange(tr->s0,ds,tr->x0-tr->x1,8.0f*t->x0full,point,cl+0,cl+2);
+                txt_rectrange(tr->t0,dt,tr->y0-tr->y1,8.0f*t->y0full,point,cl+1,cl+3);
+                clamp=1;
+            }
+        }
     }
 
     // less than a row tall: at least one. A 1-row rectangle is one
@@ -3236,6 +3311,13 @@ void rdp_texrect(TexRect *tr)
     v->pos[2]=1.0;
     v->tex[0]=u0;
     v->tex[1]=v1;
+
+    if(clamp)
+    {
+        p->clamp=p2->clamp=1;
+        memcpy(p->tclamp,cl,sizeof(cl));
+        memcpy(p2->tclamp,cl,sizeof(cl));
+    }
 
     st2.gfx_tris+=2;
 }
@@ -5786,11 +5868,14 @@ static void clear(int color)
 
 static void swap(void);
 
+static int cpupic_quiet; // retraces since the RDP's last frame (rdp_cpupicture)
+
 // shows the frame waiting in rst.pendingcbuf
 void rdp_present(void)
 {
     if(!rst.presentpending) return;
     rst.presentpending=0;
+    cpupic_quiet=0;
     prof_begin(PROF_PRESENT);
     swap();
     prof_end(PROF_PRESENT);
@@ -7283,13 +7368,17 @@ void rdp_rawlistend(void)
     if(cart.vifb && rst.rtt_on) rtt_end();
 }
 
+// the VI interpolates when it scales a buffer to the screen (rdp_cpupicture:
+// Donald Duck's 300x222 title); softrdp and vifb=1 keep their sharp pixels
+static int showvi_smooth;
+
 // Show the framebuffer the VI scans out (origin, width in pixels, bytes per
 // pixel 2 or 4), for pictures drawn in RDRAM: by the software RDP
 // (rdp_soft.c), or with vifb=1 by the game's CPU and the renderer's
 // write-back. Called from the retrace on the emulation thread.
 void rdp_showvi(dword origin,int width,int height,int bpp)
 {
-    static int   handle,texw,texh;
+    static int   handle,texw,texh,texsmooth;
     static byte *buf;
     int x,y;
 
@@ -7297,14 +7386,15 @@ void rdp_showvi(dword origin,int width,int height,int bpp)
     if(!rst.opened) rdp_opendisplay();
     if(!rst.fullscreen) return;
     if(rst.rtt_on) rtt_end(); // the quad below goes to the window's buffer
-    if(width!=texw || height!=texh)
+    if(width!=texw || height!=texh || showvi_smooth!=texsmooth)
     {
         if(handle>0) x_freetexture(handle);
-        handle=x_createtexture(X_RGBA8888|X_CLAMP|X_NOBILIN,width,height);
+        handle=x_createtexture(X_RGBA8888|X_CLAMP|(showvi_smooth?0:X_NOBILIN),width,height);
         free(buf);
         buf=(byte *)malloc(width*height*4);
         texw=width;
         texh=height;
+        texsmooth=showvi_smooth;
     }
     if(handle<=0 || !buf) return;
 
@@ -7348,8 +7438,50 @@ void rdp_showvi(dword origin,int width,int height,int bpp)
     rst.modechange=2;
     newmode();
 
-    rst.presentpending=1;
-    rdp_present();
+    // RDRAM's own picture: not a drawn frame, which rdp_present would take
+    // for the last color buffer's (and write back there with fbwrite=1)
+    rst.presentpending=0;
+    prof_begin(PROF_PRESENT);
+    swap();
+    prof_end(PROF_PRESENT);
+    if(snaprequest) snap_take();
+}
+
+// A picture the game's CPU draws in the frame buffer: Donald Duck Goin'
+// Quackers shows its logos and title that way, 30 seconds without one
+// graphics task, and the window stayed black. Per retrace: the RDP has
+// finished or shown no frame for a few retraces, and the buffer the VI shows
+// has changed in RDRAM since. A still screen the RDP drew doesn't change
+// there, so OpenGL's picture stays. GLideN64 (VI.cpp, CHANGED_CPU_FB_WRITE)
+// and Glide64 (no_dlist) copy the VI's buffer from RDRAM the same way.
+void rdp_cpupicture(dword origin,int width,int height,int bpp)
+{
+    static int   frame=-1,last;
+    static dword hash;
+    dword  h=2166136261u,*p,size;
+    int    n;
+
+    if(rst.myframe!=frame) { frame=rst.myframe; cpupic_quiet=0; }
+    if(!cpupic_quiet) last=0;
+    if(++cpupic_quiet<4) return;
+    if(width<=0 || height<=0 || width>1024 || height>1024) return;
+    origin&=0xffffff;
+    size=(dword)(width*height*bpp);
+    if(origin+size+4>(dword)mem.ramsize) return;
+
+    cache_swapdirty(origin,origin+size); // the pixels still in the D-cache
+    p=(dword *)(mem.ram+(origin&~3));
+    for(n=size/4;n>0;n--) h=(h^*p++)*16777619u;
+    if(cpupic_quiet==4) hash=h; // what the RDP's frame left there
+    else if(h!=hash && cpupic_quiet-last>=2)
+    { // at most every other retrace: a present waits for the monitor
+        hash=h;
+        last=cpupic_quiet;
+        showvi_smooth=1;
+        rdp_showvi(origin,width,height,bpp);
+        showvi_smooth=0;
+    }
+    cache_swapdirty(origin,origin+size);
 }
 
 // per retrace: a frame no VI origin ever matched is shown anyway, unless

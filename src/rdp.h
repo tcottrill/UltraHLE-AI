@@ -38,7 +38,9 @@ typedef struct
 {
     Vertex *c[3];
     int     wirecolor; // 0=don't draw, 1-7=color (set in flush)
-} Primitive; // 16 bytes
+    int     clamp;     // tclamp is set (texture rectangles)
+    float   tclamp[4]; // tex[] s,t min and s,t max the texture is sampled inside
+} Primitive;
 // viewport changes saved as:
 // c[0]=NULL
 // c[1]=NULL
@@ -85,6 +87,7 @@ void rdp_present(void);
 void rdp_viorigin(dword origin);
 void rdp_retrace(void);
 void rdp_showvi(dword origin,int width,int height,int bpp); // RDRAM framebuffer to screen
+void rdp_cpupicture(dword origin,int width,int height,int bpp); // per retrace (LLE): a CPU-drawn picture
 void rdp_opendisplay(void);
 void rdp_closedisplay(void);
 void rdp_screenshot(char *file); // PNG; NULL: snap\<title>_<time>.png

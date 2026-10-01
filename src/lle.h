@@ -113,6 +113,7 @@ extern dword *fetch_words;          // the last fetched I-cache line (c_exec's f
 extern dword  fetch_base,fetch_gen,fetch_status;
 void  cache_op(int op,dword a);     // the CACHE instruction
 void  cache_flushall(void);         // write back dirty D-cache lines (save state)
+void  cache_swapdirty(dword lo,dword hi); // dirty lines in lo..hi <-> RAM (call twice)
 void  cache_reset(void);            // invalidate both (reset, state load)
 // cpuc.c: a PC outside the sign-extended 32-bit space (st.pc low word,
 // cpu_pchi high word while cpu_pc64 is set)
