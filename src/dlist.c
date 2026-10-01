@@ -70,6 +70,10 @@ typedef struct
     Light   light[8];
     float   lightmat[16];
     int     lightnumchanged;
+    // F3DEX2 texture generation: the look-at vectors (G_MV_LIGHT slots 0
+    // and 1), normalized; lookaton as GLideN64's gSPLookAt enables them
+    float   lookat[2][3];
+    int     lookaton;
     // fog
     float   fognear;
     float   fogfar;
@@ -832,7 +836,48 @@ void g_loadvtx(dword addr,int v0,int vn)
         }
 
         // extract texture coordinates
-        if(gst.texgen==1)
+        if(gst.texgen && cart.dlist_zelda==1)
+        { // F3DEX2 (GLideN64 gSPProcessVertex): the normal in the
+          // modelview's space, measured along the look-at vectors (the
+          // camera's right and up) or along x and y without them. Army Men
+          // Sarge's Heroes puts a plastic shine on its soldiers this way; with
+          // the vertex's own coordinates the shine covered the whole figure.
+            const float *mv=gst.mtx[0][gst.mtxstackp[0]];
+            float n[3],w[3],gx,gy,len;
+            n[0]=(float)(char)(v->icol>>24);
+            n[1]=(float)(char)(v->icol>>16);
+            n[2]=(float)(char)(v->icol>>8);
+            w[0]=n[0]*mv[0+0*4]+n[1]*mv[0+1*4]+n[2]*mv[0+2*4];
+            w[1]=n[0]*mv[1+0*4]+n[1]*mv[1+1*4]+n[2]*mv[1+2*4];
+            w[2]=n[0]*mv[2+0*4]+n[1]*mv[2+1*4]+n[2]*mv[2+2*4];
+            len=sqrtf(w[0]*w[0]+w[1]*w[1]+w[2]*w[2]);
+            if(len>0.0f) { w[0]/=len; w[1]/=len; w[2]/=len; }
+            if(gst.lookaton)
+            {
+                gx=w[0]*gst.lookat[0][0]+w[1]*gst.lookat[0][1]+w[2]*gst.lookat[0][2];
+                gy=w[0]*gst.lookat[1][0]+w[1]*gst.lookat[1][1]+w[2]*gst.lookat[1][2];
+            }
+            else
+            {
+                gx=w[0];
+                gy=w[1];
+            }
+            if(gst.texgen&2)
+            { // G_TEXTURE_GEN_LINEAR
+                if(gx<-1.0f) gx=-1.0f;
+                if(gx> 1.0f) gx= 1.0f;
+                if(gy<-1.0f) gy=-1.0f;
+                if(gy> 1.0f) gy= 1.0f;
+                v->tex[0]=acosf(-gx)*(32768.0f/3.14159265f);
+                v->tex[1]=acosf(-gy)*(32768.0f/3.14159265f);
+            }
+            else
+            {
+                v->tex[0]=(gx+1.0f)*16384.0f;
+                v->tex[1]=(gy+1.0f)*16384.0f;
+            }
+        }
+        else if(gst.texgen==1)
         {
             float  nor[4];
             float s,t,u;
@@ -1469,7 +1514,7 @@ void change_geom(dword x)
     {
         gst.cull   =(x>>9)&3;
         gst.lightvx=(x&0x20000)?1:0; // 10000
-        gst.texgen =0;
+        gst.texgen =(x&0xc0000)>>18; // G_TEXTURE_GEN, G_TEXTURE_GEN_LINEAR
         gst.flat   =(x&0x80000)?1:0; //��
         if(!(x&4)) gst.flat=0;
         rdp_flat(gst.flat);
@@ -1790,6 +1835,22 @@ void c_movemem_zelda(int ind,dword a)
     else if((cmd[0]&0xff)==14)
     { // G_MV_MATRIX
         g_forcemtx(addr);
+    }
+    else if((cmd[0]&0xff)==10 && (ind==0x0800 || ind==0x0803))
+    { // G_MV_LIGHT slots 0 and 1: the look-at vectors for texture
+      // generation (direction at +8, as in a light)
+        int   n=ind==0x0803;
+        dword d=mem_read32p(addr+8);
+        float x=(float)(char)(d>>24);
+        float y=(float)(char)(d>>16);
+        float z=(float)(char)(d>>8);
+        float len=sqrtf(x*x+y*y+z*z);
+        if(len>0.0f) { x/=len; y/=len; z/=len; }
+        gst.lookat[n][0]=x;
+        gst.lookat[n][1]=y;
+        gst.lookat[n][2]=z;
+        gst.lookaton=!n || x!=0.0f || y!=0.0f; // GLideN64 gSPLookAt
+        logd(" lookat %i: %.2f %.2f %.2f",n,x,y,z);
     }
     else if(ind>=0x0806 && ind<=0x0806+3*8)
     {
@@ -3059,6 +3120,7 @@ int dlist_execute(OSTask_t *task)
     gst.framehadbackground=0;
     gst.lightnum=0;
     gst.lightnumchanged=1;
+    gst.lookaton=0;
 
     stackp=1;
     if(dlist_walk()) return(1);

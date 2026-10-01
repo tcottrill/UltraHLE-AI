@@ -1257,6 +1257,8 @@ static void txt_fromtlut(byte *dst,Tile *t)
         }
 }
 
+static void rtt_sync(void);
+
 dword txt_calccrc(Tile *t)
 {
     int    size,rl;
@@ -1278,6 +1280,13 @@ dword txt_calccrc(Tile *t)
     // the framegrab (a new key each frame, so it is reloaded when the frame
     // changes); other color buffers keep the placeholder pattern
     t->fromfb=cbufsource(t->membase);
+    if(t->fromfb==2 && rst.rtt_on &&
+       (t->membase&0x1fffffff)>=rst.rtt_addr &&
+       (t->membase&0x1fffffff)<rst.rtt_addr+(dword)(rst.rtt_w*rst.rtt_h)*(rst.rtt_bpp==3?4:rst.rtt_bpp==2?2:1))
+    { // the buffer being drawn in: its picture so far, not the placeholder
+        rtt_sync();
+        t->fromfb=0;
+    }
     if(t->fromfb==1) return(0xfb000000^rst.frontframe);
     if(t->fromfb==2) return(-2);
 
@@ -2125,9 +2134,13 @@ void txt_loaddata(Texture *txt,Tile *t)
     //if(st.dumpgfx) logd("\n+tile x_create %04X size %ix%i\n",flags,txt->xs,txt->ys);
 }
 
+// Tile `tile` counted from G_TEXTURE's tile. The RDP has eight and the index
+// wraps: Army Men Sarge's Heroes draws its soldiers' shine with tile 7.
+#define TEXTILE(n) (rst.tile+(((n)+rst.texturetile)&7))
+
 void txt_setscales(int tile)
 {
-    Tile    *t=rst.tile+tile+rst.texturetile;
+    Tile    *t=TEXTILE(tile);
     Texture *txt=rst.txt+t->texture;
     float    xd,yd,xdm,ydm;
 
@@ -2179,7 +2192,7 @@ void txt_setscales(int tile)
 
 void txt_select(int tile)
 {
-    Tile    *t=rst.tile+tile+rst.texturetile;
+    Tile    *t=TEXTILE(tile);
     Texture *txt=rst.txt+t->texture;
 
     if(st.dumpgfx) logd("\n+tile SELECT tile %i txt %i",tile,t->texture);
@@ -2193,7 +2206,7 @@ void txt_select2(int tile1,int tile2)
     Texture *txt;
     int      xh1,xh2;
 
-    t=rst.tile+tile2+rst.texturetile;
+    t=TEXTILE(tile2);
     txt=rst.txt+t->texture;
     if(st.dumpgfx) logd("\n+tile SELECT-MT1 tile %i txt %i",tile1,t->texture);
     xh2=txt->xhandle;
@@ -2204,7 +2217,7 @@ void txt_select2(int tile1,int tile2)
     rst.txt_uadd2=rst.txt_uadd;
     rst.txt_vadd2=rst.txt_vadd;
 
-    t=rst.tile+tile1+rst.texturetile;
+    t=TEXTILE(tile1);
     txt=rst.txt+t->texture;
     if(st.dumpgfx) logd("\n+tile SELECT-MT2 tile %i txt %i",tile2,t->texture);
     xh1=txt->xhandle;
@@ -2215,7 +2228,7 @@ void txt_select2(int tile1,int tile2)
 
 void txt_prepare(int tile)
 {
-    Tile    *t=rst.tile+tile+rst.texturetile;
+    Tile    *t=TEXTILE(tile);
     Texture *txt;
     int      match=0,crcerror=0,sizeok;
 
@@ -3100,7 +3113,7 @@ void rdp_texrect(TexRect *tr)
     // mask 8 from s=256 (= 0): shown from texel 112, the text was rotated.
     // Brought into the first period when the rectangle stays inside it.
     {
-        Tile *t=rst.tile+rst.texturetile;
+        Tile *t=TEXTILE(0);
         float span=fabs(tr->s1)*((tr->x0-tr->x1)>(tr->y0-tr->y1)?(tr->x0-tr->x1):(tr->y0-tr->y1))/32.0f;
         // The wrap is of the coordinate minus the tile's top left, as the RDP
         // takes it. Wrapped as an absolute value, SF Rush's HUD counter
@@ -3178,7 +3191,7 @@ void rdp_texrect(TexRect *tr)
     // clamp that axis whatever the tile's wrap (x_rectclamp). Unshifted
     // tiles only, where u/v are the tile's own texel units.
     {
-        Tile *t=rst.tile+rst.texturetile;
+        Tile *t=TEXTILE(0);
         float os=8.0f*t->x0full,ot=8.0f*t->y0full;
         int   c=0;
         if(!t->shifts && fminf(u0,u1)>=os-16.0f && fmaxf(u0,u1)<=os+32.0f*t->xs+16.0f) c|=1;
@@ -3315,7 +3328,7 @@ void rdp_viewport(float xm,float ym,float xa,float ya)
 
 static void settexturetile(int tile)
 {
-    if(tile<6 && tile!=rst.nexttexturetile)
+    if(tile<8 && tile!=rst.nexttexturetile)
     {
         // only newmode() applies the tile: without a mode change, prims
         // drawn with the old and new tile were batched and all used one
@@ -3327,7 +3340,7 @@ static void settexturetile(int tile)
 
 void rdp_texture(int on,int tile,int level)
 {
-    if(tile<6) rst.tritile=tile;
+    if(tile<8) rst.tritile=tile;
     settexturetile(tile);
 }
 
@@ -6085,13 +6098,12 @@ opened:
     logd("\n+rtt begin %08X %ix%i bpp %i",addr,w,rtth,bpp);
 }
 
-static void rtt_end(void)
+// the open target's picture into the RDRAM it stands for; returns the rows
+static int rtt_toram(void)
 {
-    int    w=rst.rtt_w,h,x,y,j;
+    int    w=rst.rtt_w,h,x,y;
     byte  *img,*s,*cover,*cv;
 
-    if(!rst.rtt_on) return;
-    flushprims();
     h=rst.rtt_maxy>0?rst.rtt_maxy:w*3/4;
     if(h>rst.rtt_h) h=rst.rtt_h;
     if(vifb.valid && vifb.addr==rst.rtt_addr)
@@ -6135,6 +6147,28 @@ static void rtt_end(void)
     }
     free(img);
     free(cover);
+    return(h);
+}
+
+// A texture is loaded from the target while it is still being drawn in:
+// RDRAM gets the picture so far. Conker blurs its shadow by drawing the
+// 64x64 buffer onto itself twice; with the color buffer placeholder as the
+// texture the blur painted the whole buffer dark and the shadow was a slab.
+static void rtt_sync(void)
+{
+    if(!rst.rtt_on) return;
+    flushprims();
+    rtt_toram();
+    logd("\n+rtt sync %08X",rst.rtt_addr);
+}
+
+static void rtt_end(void)
+{
+    int h,j;
+
+    if(!rst.rtt_on) return;
+    flushprims();
+    h=rtt_toram();
     x_rtt_end();
     rst.rtt_on=0;
     init.gfxwid     =rst.rtt_saved[0];
@@ -6457,6 +6491,23 @@ int rdp_cmd(dword *cmd)
             if(!t->masks && t->cms==0) t->cms=2;
             t->cmsset=t->cms;
             t->cmtset=t->cmt;
+            // An axis that wraps with a mask repeats every 1<<mask texels,
+            // whatever size the tile was last given. Conker's eyes are 32x32
+            // tiles (4 and 5, mask 5) drawn with no SETTILESIZE of their own;
+            // with a 2x4 left on the tile by another object they were blank
+            // white. A SETTILESIZE that follows still sets the size as before.
+            {
+                int xs=t->xs,ys=t->ys;
+                if(!(t->cms&2) && t->masks && t->masks<=10) xs=1<<t->masks;
+                if(!(t->cmt&2) && t->maskt && t->maskt<=10) ys=1<<t->maskt;
+                if((xs!=t->xs || ys!=t->ys) && xs>0 && ys>0 && xs*ys<=16384)
+                {
+                    t->xs=xs;
+                    t->ys=ys;
+                    t->x1=t->x0+xs-1;
+                    t->y1=t->y0+ys-1;
+                }
+            }
             // a SETTILE alone can change a drawn tile's wrap/mirror or
             // palette (All-Star Baseball 2001's grass switches tile 0
             // between MIRROR and WRAP on the same TMEM load)

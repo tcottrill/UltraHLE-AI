@@ -114,6 +114,28 @@
       ListView_InsertColumn( hwndList, 4, &lvC);
    }
 
+   // Order of two ROM list rows: by the name shown, then by file name. The
+   // list is filled one extension after another (*.z64 ... *.zip), so
+   // unzipped ROMs came first and nothing was in alphabetical order.
+
+   static int CALLBACK CompareROMs( LPARAM row1, LPARAM row2, LPARAM unused )
+   {
+      char a[MAX_PATH], b[MAX_PATH];
+      char *pa = a, *pb = b;
+      int  r;
+
+      // some ini titles start with a space ("alttitle= Conkers ...")
+      ListView_GetItemText( hwndList, (int)row1, 0, a, sizeof( a ) );
+      ListView_GetItemText( hwndList, (int)row2, 0, b, sizeof( b ) );
+      while( *pa == ' ' ) pa++;
+      while( *pb == ' ' ) pb++;
+      r = lstrcmpi( pa, pb );
+      if( r ) return( r );
+      ListView_GetItemText( hwndList, (int)row1, 3, a, sizeof( a ) );
+      ListView_GetItemText( hwndList, (int)row2, 3, b, sizeof( b ) );
+      return( lstrcmpi( a, b ) );
+   }
+
    // Update the Available ROMs List
 
    BOOL UpdateROMList( void )
@@ -299,6 +321,10 @@
             FindClose( hSearch );
          }
       }
+
+      // All ROMs in alphabetical order, zipped or not
+
+      ListView_SortItemsEx( hwndList, CompareROMs, 0 );
 
       // Set Window Title
 
