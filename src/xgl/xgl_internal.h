@@ -81,8 +81,11 @@ typedef struct
     float  fogmin,fogmax,fogcolor[3];
     // N64 combiner (x_n64combine); n64cycles 0 = the x_combine modes
     int    n64cycles,n64cc[8],n64ac[8];
-    float  n64prim[4],n64primlod,n64k[2];
-    GLint  u_n64cyc,u_cc0,u_cc1,u_ac0,u_ac1,u_prim,u_primlod,u_n64k;
+    float  n64prim[4],n64primlod,n64k[2],n64keyc[3],n64keys[3];
+    int    n64next;     // an input is the next pixel's texel (X_N64_NEXTTEXEL)
+    float  n64pixel;    // x_n64pixel
+    GLint  u_n64cyc,u_cc0,u_cc1,u_ac0,u_ac1,u_prim,u_primlod,u_n64k,u_n64keyc,u_n64keys;
+    GLint  u_n64next;
 } xgl_state;
 
 extern xgl_state xg;

@@ -285,12 +285,18 @@ typedef struct
 
     // framebuffer texturing detection
     dword     framecbuf;         // the frame's first screen-width color image (0: none yet)
+    dword     framezbuf;         // and the z image set when it was
     dword     lastcbufs[8];      // recent color image addresses (ring)
     int       lastcbufwid[8];    // their widths in pixels
     int       lastcbufbytes[8];  // their bytes per pixel
-    int       lastcbufhig[8];    // their heights: lowest scissor line used (0 = unknown)
+    int       lastcbufhig[8];    // their heights: lowest scissor line drawn under (0 = unknown)
     int       lastcbufi;
     int       lastcbufframe[8];  // rst.myframe when each was last set as the color image
+    dword     cbufseen[8];       // color image addresses and the frames each was
+    int       cbufseenfirst[8];  // first and last set in, while set every few frames
+    int       cbufseenlast[8];   // (rtt_secondscreen)
+    dword     fronthist[8];      // the last color buffers whose frames were presented
+    int       fronthisti;
     int       scissorhig;        // current scissor's lower edge in lines
     int       scissorwid;        // and its right edge in pixels
     char     *framegrab;         // RGBA copy of the last presented frame
@@ -392,6 +398,7 @@ typedef struct
     int       s_tluttype;
     int       s_zsrc;
     float     k4,k5;   // SETCONVERT's combiner constants (0..1)
+    float     keycenter[3],keyscale[3]; // SETKEYR/SETKEYGB's combiner inputs (0..1)
     int       kyuv[4]; // SETCONVERT's K0..K3 (signed), for YUV texels
     // raw RDP lists: SET_PRIM_DEPTH (0..1), and whether new vertices take
     // it (rectangles with primitive depth selected); see rdp_rawcmd
@@ -583,6 +590,23 @@ static int cbuf_scissorhig(int wid)
     return(h);
 }
 
+// notes a color image address and the frame (cbuf_age)
+static void cbuf_seen(dword addr)
+{
+    int j,old=0;
+    for(j=0;j<8;j++)
+    {
+        if(rst.cbufseen[j]==addr && rst.cbufseenlast[j] && rst.myframe-rst.cbufseenlast[j]<=4)
+        {
+            rst.cbufseenlast[j]=rst.myframe;
+            return;
+        }
+        if(rst.cbufseenlast[j]<rst.cbufseenlast[old]) old=j;
+    }
+    rst.cbufseen[old]=addr;
+    rst.cbufseenfirst[old]=rst.cbufseenlast[old]=rst.myframe;
+}
+
 static void setbuffer(int i,dword c0,dword c1)
 {
     dword addr=address(c1);
@@ -613,9 +637,35 @@ static void setbuffer(int i,dword c0,dword c1)
         rst.lastcbufwid  [rst.lastcbufi]=rst.bufwid[i];
         rst.lastcbufbytes[rst.lastcbufi]=bytes;
         rst.lastcbufframe[rst.lastcbufi]=rst.myframe;
-        if(cbuf_scissorhig(rst.bufwid[i])>rst.lastcbufhig[rst.lastcbufi])
-            rst.lastcbufhig[rst.lastcbufi]=cbuf_scissorhig(rst.bufwid[i]);
+        cbuf_seen(addr);
     }
+}
+
+// How many frames ago the color image at addr was first set, for as long as
+// it has been set at least every 4th frame since (0: this frame, or unknown)
+static int cbuf_age(dword addr)
+{
+    int j;
+    for(j=0;j<8;j++)
+        if(rst.cbufseen[j]==addr && rst.cbufseenlast[j] && rst.myframe-rst.cbufseenlast[j]<=4)
+            return(rst.myframe-rst.cbufseenfirst[j]);
+    return(0);
+}
+
+// A primitive is drawn: the current color buffer is at least as high as the
+// scissor it is drawn under. Only then: a scissor in effect when the buffer
+// is selected, or set and replaced with nothing drawn, belongs to another
+// buffer. Gauntlet Legends selects a 288x50 panel under the screen's 288x220
+// scissor, draws it under its own, and sets the screen's again before it
+// selects the screen: taken as 220 lines, the panel covered the room's
+// textures stored after it, and the room was drawn from placeholders (near
+// black).
+static void cbuf_drawn(void)
+{
+    int j=rst.lastcbufi,h;
+    if(rst.lastcbufs[j]!=rst.bufbase[RDP_BUF_C]) return;
+    h=cbuf_scissorhig(rst.bufwid[RDP_BUF_C]);
+    if(h>rst.lastcbufhig[j]) rst.lastcbufhig[j]=h;
 }
 
 // Is addr inside a color buffer? A buffer is as high as the lowest scissor
@@ -735,6 +785,7 @@ Primitive *newpr(void)
     }
     i=rst.prtabi++;
     rst.prtab[i].clamp=0;
+    cbuf_drawn();
     return(rst.prtab+i);
 }
 
@@ -1727,6 +1778,11 @@ void txt_convert(byte *dst0,Tile *t)
 //        txt_showpal(dst0,xs,ys,palbase,256);
     }
 //-------------------------------- 4bpp
+    // Two texels a byte; an odd width ends on a byte's high one. (The loader
+    // used to cut odd widths by a texel instead, and only when it converted:
+    // a tile found in the cache kept its width and scaled its coordinates
+    // by it. Monster Truck Madness 64's font tiles end at each glyph's last
+    // column; X, 253 texels on a 252 wide texture, began with W's.)
     else if(bpp==0 && fmt==0)
     { // RGBA 4bit 1-1-1-1
         for(y=0;y<ys;y++)
@@ -1739,6 +1795,7 @@ void txt_convert(byte *dst0,Tile *t)
                 *dst++=(m[0]&0x40)?255:0;
                 *dst++=(m[0]&0x20)?255:0;
                 *dst++=(m[0]&0x10)?255:0;
+                if(x+1>=xs) break;
                 a<<=4;
                 *dst++=(m[0]&0x80)?255:0;
                 *dst++=(m[0]&0x40)?255:0;
@@ -1757,6 +1814,7 @@ void txt_convert(byte *dst0,Tile *t)
             {
                 for(j=4;j>=0;j-=4)
                 {
+                    if(!j && x+1>=xs) break;
                     i=((m[0]>>(j+1))&7)*36;
                     a=((m[0]>>(j+0))&1)*255;
                     *dst++=i;
@@ -1777,6 +1835,7 @@ void txt_convert(byte *dst0,Tile *t)
             {
                 for(j=4;j>=0;j-=4)
                 {
+                    if(!j && x+1>=xs) break;
                     i=(m[0]>>j)&15;
                     dst[0]=i*17;
                     dst[1]=i*17;
@@ -1797,6 +1856,7 @@ void txt_convert(byte *dst0,Tile *t)
             {
                 for(j=4;j>=0;j-=4)
                 {
+                    if(!j && x+1>=xs) break;
                     i=(m[0]>>j)&15;
                     txt_paletteread(dst,i+palbase);
                     dst+=4;
@@ -2119,8 +2179,6 @@ void txt_loaddata(Texture *txt,Tile *t)
     int flags;
     int hasalpha;
     byte *s,*d,*sd;
-
-    if((t->xs&1) && t->bpp==0) t->xs--;
 
     // OpenGL takes any texture size, so textures keep the tile's size (the
     // power-of-2, 256 and aspect ratio limits were Glide's)
@@ -2925,7 +2983,9 @@ void flushprims(void)
         x_blend(rst.s_blend1,rst.s_blend2);
         x_n64combine(n64cycles,&n64cc[0][0],&n64ac[0][0],
                      rst.colf[C_PRIM],rst.colf[C_ENV],rst.colf[C_PLODF][0]);
+        x_n64pixel((float)init.gfxwid/(init.viewportwid?init.viewportwid:320));
         x_n64convert(rst.k4,rst.k5);
+        x_n64key(rst.keycenter,rst.keyscale);
         x_mask(X_ENABLE,rst.s_zupd?X_ENABLE:X_DISABLE,
                         rst.s_zcmp?X_ENABLE:X_DISABLE);
         if(COM.texenable) txt_select2(0,1);
@@ -3849,9 +3909,12 @@ static int     dump; // for com routines
 */
 // x_n64combine input codes from the combine word's selectors
 static const signed char n64_ca[16]={0,1,2,3,4,5,6,X_N64_NOISE,7,7,7,7,7,7,7,7};
-static const signed char n64_cb[16]={0,1,2,3,4,5,7,X_N64_K4,7,7,7,7,7,7,7,7};  // CENTER: 0
-static const signed char n64_cc[32]={0,1,2,3,4,5,7,8,9,10,11,12,13,X_N64_LODF,X_N64_PRIMLODF,X_N64_K5,
-                                     7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7}; // SCALE: 0
+// B 6 and C 6 are the key center and scale. Gauntlet Legends sets the scale
+// to 255 and ends its world's combine mode with COMBINED*SCALE; taken as 0,
+// every wall and half of the floor were drawn black.
+static const signed char n64_cb[16]={0,1,2,3,4,5,X_N64_KEYCENTER,X_N64_K4,7,7,7,7,7,7,7,7};
+static const signed char n64_cc[32]={0,1,2,3,4,5,X_N64_KEYSCALE,8,9,10,11,12,13,X_N64_LODF,X_N64_PRIMLODF,X_N64_K5,
+                                     7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7};
 static const signed char n64_cd[8] ={0,1,2,3,4,5,6,7};
 static const signed char n64_aa[8] ={0,1,2,3,4,5,6,7};                 // also B, D
 static const signed char n64_ac[8] ={X_N64_LODF,1,2,3,4,5,X_N64_PRIMLODF,7};
@@ -3875,11 +3938,14 @@ static int n64_fix(int v,int cycle,int cycles)
     }
     else
     {   // second cycle: the RDP feeds TEXEL1 as TEXEL0 and the next
-        // pixel's TEXEL0 as TEXEL1 (_correctSecondStageParams)
+        // pixel's TEXEL0 as TEXEL1. Monster Truck Madness 64 takes its
+        // letters' alpha from that one and starts each letter's rectangle a
+        // pixel early in the font strip; given this pixel's TEXEL0, every
+        // letter began with the last column of the glyph before it.
         if(v==1) return 2;
-        if(v==2) return 1;
+        if(v==2) return X_N64_NEXTTEXEL;
         if(v==9) return 10;
-        if(v==10) return 9;
+        if(v==10) return X_N64_NEXTTEXELA;
     }
     return v;
 }
@@ -3923,6 +3989,8 @@ static void n64_combine(dword x0,dword x1)
         {
             if(n64cc[c][i]==1 || n64cc[c][i]==9 || n64ac[c][i]==1) texuse|=1;
             if(n64cc[c][i]==2 || n64cc[c][i]==10 || n64ac[c][i]==2) texuse|=2;
+            if(n64cc[c][i]==X_N64_NEXTTEXEL || n64cc[c][i]==X_N64_NEXTTEXELA ||
+               n64ac[c][i]==X_N64_NEXTTEXEL) texuse|=1;
         }
     comn64.texenable=texuse;
     comn64.passes=1;
@@ -6156,6 +6224,7 @@ void rdp_present(void)
     // the presented picture now stands for this color buffer; textures
     // the game later reads from it come from the framegrab
     rst.frontcbuf     =rst.pendingcbuf;
+    rst.fronthist[rst.fronthisti++&7]=rst.pendingcbuf&0x1fffffff;
     rst.frontcbufwid  =rst.pendingcbufwid;
     rst.frontcbufbytes=rst.pendingcbufbytes;
     rst.frontcbufhig  =rst.pendingcbufhig;
@@ -6264,16 +6333,35 @@ static int rtt_offscreen(void)
 // and the course was black behind the golfer. Decided at the scissor the
 // game sets for it, where the few-row targets are decided too, and only
 // while the VI's origins tell which buffers are screens.
+// Unless it comes with a z image of its own: two screens drawn in one frame
+// share the frame's. Mario Golf's course buffer is whichever of its three
+// frame buffers is next, so the VI has shown it before, and the render
+// follows a loading pause in which the VI presented nothing: the course was
+// black again whenever either was looked at.
+// Or the frame's first one, when it has been set for frames and the VI has
+// still never shown it. Gauntlet Legends selects its status panel's buffer
+// (288 wide like its screen, 50 rows) at the start of every frame, draws the
+// panel in it when something changes, and copies it to the foot of the
+// screen in strips: drawn on the screen instead, the strips were color
+// buffer placeholders (a dark pattern where the panel belongs).
+#define RTT_UNSHOWN 3 // frames set without being shown
 static int rtt_secondscreen(void)
 {
     dword c=rst.bufbase[RDP_BUF_C];
-    int   w=rst.bufwid[RDP_BUF_C];
-    if(!rst.framecbuf || c==rst.framecbuf || c==rst.bufbase[RDP_BUF_Z]) return(0);
-    if((w!=320 && w!=640) || rst.buffmt[RDP_BUF_C]!=0 || rst.bufbpp[RDP_BUF_C]!=2) return(0);
-    if(!vi_presents() || vi_hasshown(c)) return(0);
+    int   w=rst.bufwid[RDP_BUF_C],j;
+    if(c==rst.bufbase[RDP_BUF_Z]) return(0);
+    if((w!=320 && w!=640 && w!=init.viewportwid) || rst.buffmt[RDP_BUF_C]!=0 || rst.bufbpp[RDP_BUF_C]!=2) return(0);
     if((c&0x1fffffff)==(rst.frontcbuf&0x1fffffff) ||
        (rst.presentpending && (c&0x1fffffff)==(rst.pendingcbuf&0x1fffffff))) return(0);
-    return(1);
+    // a second one with a z image of its own is a picture of its own,
+    // whatever the VI has done
+    if(rst.framecbuf && c!=rst.framecbuf && rst.bufbase[RDP_BUF_Z]!=rst.framezbuf) return(1);
+    if(!vi_presents() || vi_hasshown(c)) return(0);
+    if(rst.framecbuf && c!=rst.framecbuf) return(1);
+    // nor presented as a frame: Kraken64's frames are shown at their
+    // successor's start and never enter the VI's list
+    for(j=0;j<8;j++) if(rst.fronthist[j]==(c&0x1fffffff)) return(0);
+    return(cbuf_age(c)>=RTT_UNSHOWN);
 }
 
 /****************************************************************************
@@ -6471,7 +6559,14 @@ opened:
     init.gfxwid=init.viewportwid=w;   // N64 pixels map 1:1 onto the FBO
     init.gfxhig=init.viewporthig=rtth;
     rst.rectmode=-1;
-    rdp_viewport(w*0.5f,rtth*0.5f,w*0.5f,rtth*0.5f);
+    // the viewport is RSP state, not the color buffer's (rtt_end): the one
+    // the display list has set goes on. Mario Golf sets the screen's at the
+    // start of the frame and none for the buffer it renders the course in;
+    // under the target's own (320x512) the course was drawn at twice its
+    // height, most of it below the picture, and the backdrop showed where the
+    // fairway belongs.
+    if(rst.gamevpset) rdp_viewport(rst.gamevp[0],rst.gamevp[1],rst.gamevp[2],rst.gamevp[3]);
+    else rdp_viewport(w*0.5f,rtth*0.5f,w*0.5f,rtth*0.5f);
     x_scissor(0,0,0,0,0);
     logd("\n+rtt begin %08X %ix%i bpp %i",addr,w,rtth,bpp);
 }
@@ -6768,7 +6863,10 @@ int rdp_cmd(dword *cmd)
         // the z image (rtt_secondscreen)
         if(!rst.framecbuf && !rst.rtt_on && rst.bufbase[RDP_BUF_C]!=rst.bufbase[RDP_BUF_Z] &&
            (rst.bufwid[RDP_BUF_C]==320 || rst.bufwid[RDP_BUF_C]==640))
+        {
             rst.framecbuf=rst.bufbase[RDP_BUF_C];
+            rst.framezbuf=rst.bufbase[RDP_BUF_Z];
+        }
         // HLE: the screen size otherwise comes only from a full screen
         // fillrect (rdp_fillrect); Pokemon Stadium's 640x480 screens clear
         // with a texrect and were drawn at 2x (only their top left quarter
@@ -7128,17 +7226,14 @@ int rdp_cmd(dword *cmd)
                 FIELD(cmd[1],12,12)/4,FIELD(cmd[1],0,12)/4);
             if(rst.rtt_on && (int)FIELD(cmd[1],0,12)/4>rst.rtt_maxy)
                 rst.rtt_maxy=FIELD(cmd[1],0,12)/4; // rows to write back
-            // the current color buffer is at least this high (cbufsource)
+            // a buffer drawn in under it is at least this high (cbuf_drawn)
             rst.scissorhig=(FIELD(cmd[1],0,12)+3)/4;
             rst.scissorwid=(FIELD(cmd[1],12,12)+3)/4;
-            if(rst.lastcbufs[rst.lastcbufi]==rst.bufbase[RDP_BUF_C] &&
-               cbuf_scissorhig(rst.bufwid[RDP_BUF_C])>rst.lastcbufhig[rst.lastcbufi])
-                rst.lastcbufhig[rst.lastcbufi]=cbuf_scissorhig(rst.bufwid[RDP_BUF_C]);
         }
         break;
-    // Known gap: the OpenGL combiner has no key center/scale inputs and no
-    // chroma key, so the key commands are ignored here (rdp_soft.c feeds
-    // key to its combiner). K4/K5 are combiner inputs: Conker's mouth is
+    // Known gap: the OpenGL combiner has no chroma key (rdp_soft.c has); the
+    // key center and scale are combiner inputs (SETKEYR/SETKEYGB below).
+    // K4/K5 are combiner inputs: Conker's mouth is
     // (SHADE-ENV)*K5+PRIM with K5=255, black without it. K0..K3 convert
     // YUV texels when the texture is built (txt_yuvtexel).
     case 0xec: // RDP_SETCONVERT
@@ -7156,11 +7251,19 @@ int rdp_cmd(dword *cmd)
         logd(" K0 %i K1 %i K2 %i K3 %i K4 %.2f K5 %.2f",
             rst.kyuv[0],rst.kyuv[1],rst.kyuv[2],rst.kyuv[3],rst.k4,rst.k5);
         break;
-    case 0xeb: // RDP_SETKEYR
-        logd("!skiprdp key r (not emulated)");
+    case 0xeb: // RDP_SETKEYR: width, center, scale (combiner inputs; no chroma key)
+        rst.keycenter[0]=FIELD(cmd[1],8,8)/255.0f;
+        rst.keyscale [0]=FIELD(cmd[1],0,8)/255.0f;
+        rst.modechange=2;
+        logd(" key r center %.2f scale %.2f",rst.keycenter[0],rst.keyscale[0]);
         break;
     case 0xea: // RDP_SETKEYGB
-        logd("!skiprdp key gb (not emulated)");
+        rst.keycenter[1]=FIELD(cmd[1],24,8)/255.0f;
+        rst.keyscale [1]=FIELD(cmd[1],16,8)/255.0f;
+        rst.keycenter[2]=FIELD(cmd[1],8,8)/255.0f;
+        rst.keyscale [2]=FIELD(cmd[1],0,8)/255.0f;
+        rst.modechange=2;
+        logd(" key gb center %.2f %.2f scale %.2f %.2f",rst.keycenter[1],rst.keycenter[2],rst.keyscale[1],rst.keyscale[2]);
         break;
     case 0xe9: // RDP_RDPFULLSYNC
         st2.gfxdpsyncpending=1;

@@ -75,10 +75,14 @@ static const char *fs_src=
 "uniform vec4  u_prim;\n"
 "uniform float u_primlod;\n"
 "uniform vec2  u_n64k;\n"                       // K4, K5 (SETCONVERT)
+"uniform vec3  u_n64keyc;\n"                    // key center, scale (SETKEYR/GB)
+"uniform vec3  u_n64keys;\n"
+"uniform float u_n64next;\n"                    // an N64 pixel in target pixels, 0 = no input needs g_tn
 "out vec4 o_col;\n"
 "\n"
 // the N64 combiner (x_n64combine): (A-B)*C+D per cycle
-"vec4 g_t0,g_t1;\n"
+// g_tn: texel 0 of the N64 pixel to the right, the second cycle's TEXEL1
+"vec4 g_t0,g_t1,g_tn;\n"
 "float noise()\n"
 "{\n"
 "    return fract(sin(dot(gl_FragCoord.xy,vec2(12.9898,78.233)))*43758.5453);\n"
@@ -103,6 +107,10 @@ static const char *fs_src=
 "    if(s==17) return vec3(u_n64k.x);\n"
 "    if(s==18) return vec3(u_n64k.y);\n"
 "    if(s==19) return vec3(0.5);\n"
+"    if(s==20) return u_n64keyc;\n"
+"    if(s==21) return u_n64keys;\n"
+"    if(s==22) return g_tn.rgb;\n"
+"    if(s==23) return vec3(g_tn.a);\n"
 "    return vec3(0.0);\n"                        // 7 zero, 14 lod fraction
 "}\n"
 "float ain(int s,vec4 cb)\n"
@@ -117,6 +125,7 @@ static const char *fs_src=
 "    if(s==15) return u_primlod;\n"
 "    if(s==16) return noise();\n"
 "    if(s==19) return 0.5;\n"
+"    if(s==22 || s==23) return g_tn.a;\n"
 "    return 0.0;\n"
 "}\n"
 "vec4 cycle(ivec4 cc,ivec4 ac,vec4 cb)\n"
@@ -193,8 +202,11 @@ static const char *fs_src=
 "    if(u_n64cyc>0)\n"
 "    {\n"
 "        vec4 r;\n"
+"        vec2 nx=dFdx(v_tex1)*u_n64next;\n"                                               // one N64 pixel across
 "        g_t0=texture(u_tex1,tc1());\n"
 "        g_t1=texture(u_tex2,v_tex2);\n"
+"        g_tn=g_t0;\n"
+"        if(u_n64next>0.0) g_tn=texture(u_tex1,tc1()+nx);\n"
 "        r=cycle(u_cc0,u_ac0,vec4(0.5));\n"
 "        if(u_n64cyc>1) r=cycle(u_cc1,u_ac1,r);\n"
 "        rgb=r.rgb;\n"
@@ -281,6 +293,9 @@ int xgl_shader_create(void)
     xg.u_prim     =glGetUniformLocation(xg.prog,"u_prim");
     xg.u_primlod  =glGetUniformLocation(xg.prog,"u_primlod");
     xg.u_n64k     =glGetUniformLocation(xg.prog,"u_n64k");
+    xg.u_n64keyc  =glGetUniformLocation(xg.prog,"u_n64keyc");
+    xg.u_n64keys  =glGetUniformLocation(xg.prog,"u_n64keys");
+    xg.u_n64next  =glGetUniformLocation(xg.prog,"u_n64next");
 
     glUseProgram(xg.prog);
     glUniform1i(xg.u_tex1,0);

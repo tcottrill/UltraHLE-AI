@@ -313,9 +313,15 @@ EXPORT int     x_procombine2(int rgb,int alpha,int text1text2,int sametex);
 #define X_N64_K4        17 // SETCONVERT's K4, K5 (x_n64convert)
 #define X_N64_K5        18
 #define X_N64_HALF      19
+#define X_N64_KEYCENTER 20 // SETKEYR/SETKEYGB's center and scale (x_n64key)
+#define X_N64_KEYSCALE  21
+#define X_N64_NEXTTEXEL  22 // texel0 of the pixel to the right (x_n64pixel),
+#define X_N64_NEXTTEXELA 23 // and its alpha as a color
 EXPORT void    x_n64combine(int cycles,const int *cc,const int *ac,
                             const float *prim,const float *env,float primlod);
+EXPORT void    x_n64pixel(float width); // an N64 pixel's width in target pixels
 EXPORT void    x_n64convert(float k4,float k5);
+EXPORT void    x_n64key(const float *center,const float *scale); // r,g,b each
 
 EXPORT int     x_texture(int text1handle); // single texture
 EXPORT int     x_texture2(int text1handle,int text2handle); // dual texture

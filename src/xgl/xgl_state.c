@@ -160,6 +160,21 @@ void x_n64combine(int cycles,const int *cc,const int *ac,
     memcpy(xg.n64prim,prim,sizeof(xg.n64prim));
     memcpy(xg.env,env,sizeof(xg.env));
     xg.n64primlod=primlod;
+    xg.n64next=0;
+    {
+        int i;
+        for(i=0;i<xg.n64cycles*4;i++)
+            if(cc[i]==X_N64_NEXTTEXEL || cc[i]==X_N64_NEXTTEXELA ||
+               ac[i]==X_N64_NEXTTEXEL || ac[i]==X_N64_NEXTTEXELA) xg.n64next=1;
+    }
+}
+
+// The next pixel is the N64's, this many target pixels to the right.
+void x_n64pixel(float width)
+{
+    if(width==xg.n64pixel) return;
+    x_flush();
+    xg.n64pixel=width;
 }
 
 void x_n64convert(float k4,float k5)
@@ -168,6 +183,15 @@ void x_n64convert(float k4,float k5)
     x_flush();
     xg.n64k[0]=k4;
     xg.n64k[1]=k5;
+}
+
+void x_n64key(const float *center,const float *scale)
+{
+    if(!memcmp(center,xg.n64keyc,sizeof(xg.n64keyc)) &&
+       !memcmp(scale,xg.n64keys,sizeof(xg.n64keys))) return;
+    x_flush();
+    memcpy(xg.n64keyc,center,sizeof(xg.n64keyc));
+    memcpy(xg.n64keys,scale,sizeof(xg.n64keys));
 }
 
 // Two texture units are always available (the old Voodoo2 check passes).
@@ -345,6 +369,9 @@ void xgl_state_apply(void)
         glUniform4fv(xg.u_prim,1,xg.n64prim);
         glUniform1f(xg.u_primlod,xg.n64primlod);
         glUniform2f(xg.u_n64k,xg.n64k[0],xg.n64k[1]);
+        glUniform3fv(xg.u_n64keyc,1,xg.n64keyc);
+        glUniform3fv(xg.u_n64keys,1,xg.n64keys);
+        glUniform1f(xg.u_n64next,xg.n64next?xg.n64pixel:0.0f);
     }
     xgl_applydepth();
 
