@@ -224,8 +224,10 @@ More notes intermixed with the definitions, read on.
 ** Disable some warnings
 */
 
+#ifdef _MSC_VER
 #pragma warning(disable:4244)  // conversion, possible loss of data
 #pragma warning(disable:4018)  // signed/unsigned mismatch
+#endif
 
 /****************************************************************************
 ** Headers
@@ -237,6 +239,7 @@ More notes intermixed with the definitions, read on.
 #include <string.h>
 #include <stdarg.h>
 #include <malloc.h>
+#include "compat.h"
 #include <math.h>
 #include <ctype.h>
 
@@ -246,8 +249,8 @@ More notes intermixed with the definitions, read on.
 
 // TODO: Change all types to stdint, for better readability/portability of the code
 
-typedef          __int64    qint;
-typedef unsigned __int64    qword;
+typedef int64_t             qint;
+typedef uint64_t            qword;
 typedef unsigned int        dword;
 typedef unsigned short      word;
 typedef unsigned char       byte;

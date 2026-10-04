@@ -2,6 +2,9 @@
 Build/*
 !Build/UltraHLE64.exe
 !Build/ULTRA.INI
+!Build/linux/
+Build/linux/*
+!Build/linux/ultrahle.flatpak
 *.pdb
 *.ilk
 *.obj

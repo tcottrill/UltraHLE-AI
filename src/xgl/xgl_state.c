@@ -250,20 +250,30 @@ int x_texture2(int text1handle,int text2handle)
 // tile-sized wrap never shows; drawn larger, bilinear filtering at the
 // rectangle's edge blended in the tile's opposite row (SF Rush's Midway
 // logo, 8-row strips with an 8-row mask, had a line at every join).
-int x_rectclamp(int s,int t)
+//
+// point: sample texels, not between them. A rectangle drawn 1:1 from whole
+// texels samples each texel's centre on the RDP, so its filter blends
+// nothing; drawn at 2x, GL's filter mixed every edge texel with the
+// transparent one beside it. Mario Kart 64's player select portraits
+// (64x16 strips, alpha blended) had a halo of half-transparent pixels.
+int x_rectclamp(int s,int t,int point)
 {
-    int c=(s?1:0)|(t?2:0);
+    int c=(s?1:0)|(t?2:0)|(point?4:0);
     if(c==xg.rectclamp) return 0;
     x_flush();
     xg.rectclamp=c;
     return 0;
 }
 
-// a sampler for clamp mode c (1 s, 2 t, 3 both) and filter, made once
+// a sampler for clamp mode c (1 s, 2 t, 3 both; 4 point) and filter, made once
 static GLuint rectsampler(int c,int nearest)
 {
     static GLuint smp[4][2];
-    GLuint *s=&smp[c][nearest];
+    GLuint *s;
+    if(c&4) nearest=1;
+    c&=3;
+    nearest=nearest?1:0;
+    s=&smp[c][nearest];
     if(!*s)
     {
         GLenum f=nearest?GL_NEAREST:GL_LINEAR;

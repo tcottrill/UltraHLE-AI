@@ -1,4 +1,9 @@
+#ifdef _WIN32
 #include <windows.h>
+#else
+#include <fcntl.h>
+#include <sys/mman.h>
+#endif
 #include "ultra.h"
 #include "zip/romzip.h"
 
@@ -74,6 +79,19 @@ int cart_load(char *fname)
 
 int cart_map(char *fname)
 {
+#ifndef _WIN32
+    // Linux: the file stays open while it is mapped (fd in mapfilehandle)
+    int fd=open(fname,O_RDONLY);
+    void *p;
+    if(fd<0) return(1);
+    p=mmap(NULL,cart.size,PROT_READ,MAP_SHARED,fd,0);
+    if(p==MAP_FAILED) { close(fd); return(1); }
+    cart.mapfilehandle=(void *)(intptr_t)(fd+1); // +1: 0 means none
+    cart.maphandle=NULL;
+    cart.mapped=1;
+    cart.data=p;
+    return(0);
+#else
 //    print("mapping starts (%s)\n",fname); flushdisplay();
 
     cart.mapfilehandle=CreateFile(
@@ -104,6 +122,7 @@ int cart_map(char *fname)
 
 //    print("mapping ends\n"); flushdisplay();
     return(0);
+#endif
 }
 
 void cart_free(void)
@@ -112,9 +131,14 @@ void cart_free(void)
 
     if(cart.mapped)
     {
+#ifdef _WIN32
         UnmapViewOfFile(cart.data);
         CloseHandle((HANDLE)cart.maphandle);
         CloseHandle((HANDLE)cart.mapfilehandle);
+#else
+        munmap(cart.data,cart.size);
+        if(cart.mapfilehandle) close((int)(intptr_t)cart.mapfilehandle-1);
+#endif
     }
     else
     {

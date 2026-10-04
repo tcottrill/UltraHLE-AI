@@ -1,59 +1,84 @@
+#ifdef _WIN32
 #include <windows.h>
 #include <mmsystem.h>
 #include <dbghelp.h>
+#else
+#include <time.h>
+#endif
 #include "ultra.h"
 #include "rsp_cxd4.h"
 
+#ifdef _WIN32
 #pragma comment(lib,"dbghelp.lib")
 #pragma comment(lib,"winmm.lib")
+#endif
 
-static LARGE_INTEGER  perf_freq;
-static int            initdone;
+// the host's high resolution clock: perf_now() counts perf_hz a second
+static qint perf_hz;
+static int  initdone;
 
-void timer_reset(Timer *t)
+static qint perf_now(void)
 {
-    if(!initdone)
+#ifdef _WIN32
+    LARGE_INTEGER pc;
+    QueryPerformanceCounter(&pc);
+    return(pc.QuadPart);
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC,&ts);
+    return((qint)ts.tv_sec*1000000000+ts.tv_nsec);
+#endif
+}
+
+static void perf_init(void)
+{
+    if(initdone) return;
+#ifdef _WIN32
     {
-        if(!QueryPerformanceFrequency(&perf_freq))
+        LARGE_INTEGER f;
+        if(!QueryPerformanceFrequency(&f))
         {
             exception("This computer does not support Pentium Performance Counter\n");
         }
-        initdone=1;
+        perf_hz=f.QuadPart;
     }
-    QueryPerformanceCounter((LARGE_INTEGER *)&t->perf_zero);
+#else
+    perf_hz=1000000000;
+#endif
+    initdone=1;
+}
+
+#define PERF_ZERO(t) (*(qint *)(t)->perf_zero)
+
+void timer_reset(Timer *t)
+{
+    perf_init();
+    PERF_ZERO(t)=perf_now();
 }
 
 int  timer_us(Timer *t)
 {
-    LARGE_INTEGER pc;
-    QueryPerformanceCounter(&pc);
-    return((int)(1000000*(pc.QuadPart-((LARGE_INTEGER *)&t->perf_zero)->QuadPart)/perf_freq.QuadPart));
+    return((int)(1000000*(perf_now()-PERF_ZERO(t))/perf_hz));
 }
 
 int  timer_ms(Timer *t)
 {
-    LARGE_INTEGER pc;
-    QueryPerformanceCounter(&pc);
-    return((int)(1000*(pc.QuadPart-((LARGE_INTEGER *)&t->perf_zero)->QuadPart)/perf_freq.QuadPart));
+    return((int)(1000*(perf_now()-PERF_ZERO(t))/perf_hz));
 }
 
 int  timer_usreset(Timer *t)
 {
-    LARGE_INTEGER pc;
-    int r;
-    QueryPerformanceCounter(&pc);
-    r=(int)(1000000*(pc.QuadPart-((LARGE_INTEGER *)&t->perf_zero)->QuadPart)/perf_freq.QuadPart);
-    *(LARGE_INTEGER *)&t->perf_zero=pc;
+    qint pc=perf_now();
+    int  r=(int)(1000000*(pc-PERF_ZERO(t))/perf_hz);
+    PERF_ZERO(t)=pc;
     return(r);
 }
 
 int  timer_msreset(Timer *t)
 {
-    LARGE_INTEGER pc;
-    int r;
-    QueryPerformanceCounter(&pc);
-    r=(int)(1000*(pc.QuadPart-((LARGE_INTEGER *)&t->perf_zero)->QuadPart)/perf_freq.QuadPart);
-    *(LARGE_INTEGER *)&t->perf_zero=pc;
+    qint pc=perf_now();
+    int  r=(int)(1000*(pc-PERF_ZERO(t))/perf_hz);
+    PERF_ZERO(t)=pc;
     return(r);
 }
 
@@ -62,23 +87,19 @@ int  timer_msreset(Timer *t)
 ** (nested) counts only the outer span.
 */
 
-static LONGLONG prof_start[PROF_N],prof_sum[PROF_N],prof_wall;
+static qint prof_start[PROF_N],prof_sum[PROF_N],prof_wall;
 static int      prof_depth[PROF_N];
 
 void prof_begin(int i)
 {
-    LARGE_INTEGER pc;
     if(prof_depth[i]++) return;
-    QueryPerformanceCounter(&pc);
-    prof_start[i]=pc.QuadPart;
+    prof_start[i]=perf_now();
 }
 
 void prof_end(int i)
 {
-    LARGE_INTEGER pc;
     if(prof_depth[i]<=0 || --prof_depth[i]) return;
-    QueryPerformanceCounter(&pc);
-    prof_sum[i]+=pc.QuadPart-prof_start[i];
+    prof_sum[i]+=perf_now()-prof_start[i];
 }
 
 /****************************************************************************
@@ -87,6 +108,12 @@ void prof_end(int i)
 ** lists the functions the samples fell in (inlined ones by their own name;
 ** needs the .pdb). The thread sampled is the one that calls prof_report.
 */
+
+volatile int       prof_opclass;
+int                prof_opon;
+unsigned long long prof_opcount[OPC_N];
+
+#ifdef _WIN32
 
 #define SAMPLE_MAX   8192
 #define SAMPLE_NAMES 512
@@ -132,10 +159,6 @@ static DWORD WINAPI sample_main(LPVOID arg)
     timeEndPeriod(1);
     return(0);
 }
-
-volatile int       prof_opclass;
-int                prof_opon;
-unsigned long long prof_opcount[OPC_N];
 
 void prof_sample(int on)
 {
@@ -201,6 +224,21 @@ static int sample_resolve(DWORD64 ip)
     return(i);
 }
 
+#else // no sampling profiler on this platform: 'sample 1' counts instruction classes only
+
+static unsigned char sample_cls[1];
+static volatile int  sample_on;
+
+void prof_sample(int on)
+{
+    sample_on=on;
+    prof_opon=on;
+    prof_opclass=OPC_OUTSIDE;
+    memset(prof_opcount,0,sizeof(prof_opcount));
+}
+
+#endif
+
 // each instruction class: its share of the host's time (all samples, waits
 // included), of the instructions run, and the host time for one instruction
 static void opclass_report(int n,double wall)
@@ -227,6 +265,12 @@ static void opclass_report(int n,double wall)
     }
 }
 
+#ifndef _WIN32
+static void sample_report(double wall)
+{
+    if(sample_on) opclass_report(0,wall);
+}
+#else
 static void sample_report(double wall)
 {
     static int syminit;
@@ -270,26 +314,27 @@ static void sample_report(double wall)
     sample_n=0;
     sample_hold=0;
 }
+#endif
 
 // ms per second of wall time for each bucket since the last report, and the
 // frame rate the emulated retraces came at
 void prof_report(int retraces)
 {
     static const char *name[PROF_N]={"burst","rsp","rdp","present","audio","wait"};
-    LARGE_INTEGER pc;
+    qint   pc;
     double wall,ms[PROF_N];
     int    i;
 
-    if(!initdone) { Timer t; timer_reset(&t); }
-    QueryPerformanceCounter(&pc);
-    if(!prof_wall) { prof_wall=pc.QuadPart; return; }
-    wall=(double)(pc.QuadPart-prof_wall)/perf_freq.QuadPart;
-    prof_wall=pc.QuadPart;
+    perf_init();
+    pc=perf_now();
+    if(!prof_wall) { prof_wall=pc; return; }
+    wall=(double)(pc-prof_wall)/perf_hz;
+    prof_wall=pc;
     if(wall<=0) return;
     print("perf: %.1f s, %.1f VI/s;",wall,retraces/wall);
     for(i=0;i<PROF_N;i++)
     {
-        ms[i]=1000.0*prof_sum[i]/perf_freq.QuadPart/wall;
+        ms[i]=1000.0*prof_sum[i]/perf_hz/wall;
         print(" %s %.0f",name[i],ms[i]);
         prof_sum[i]=0;
     }

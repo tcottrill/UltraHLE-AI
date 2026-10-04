@@ -1,6 +1,5 @@
 #include "ultra.h"
 #include <time.h>
-#include <direct.h>
 #include "zip/miniz.h"
 
 // whole frame collected, drawn in bursts
@@ -246,7 +245,7 @@ typedef struct
     int       tritile;      // G_TEXTURE's tile, for HLE triangles
 
     int       rectmode;
-    int       rectclamp;         // queued texture rectangles sample inside their tile: 1 s, 2 t (x_rectclamp)
+    int       rectclamp;         // queued texture rectangles sample inside their tile: 1 s, 2 t; 4 point sampled (x_rectclamp)
     dword     rawfillcolor;
 
     // initdone?
@@ -482,9 +481,9 @@ static void snap_write(const unsigned char *rgba,int w,int h,const char *name0)
 
     if(name0 && *name0)
     {
-        if(name0[0]=='\\' || strchr(name0,':')) strcpy(name,name0);
+        if(name0[0]=='\\' || name0[0]=='/' || strchr(name0,':')) strcpy(name,name0);
         else sprintf(name,"%s%s",init.rootpath,name0);
-        base=strrchr(name,'\\');
+        base=strrchr(name,PATHSEP);
         if(!strchr(base?base:name,'.')) strcat(name,".png");
     }
     else
@@ -503,7 +502,7 @@ static void snap_write(const unsigned char *rgba,int w,int h,const char *name0)
         localtime_s(&t,&now);
         sprintf(stamp,"%ssnap",init.rootpath);
         _mkdir(stamp);
-        sprintf(stamp,"%ssnap\\%s_%04i%02i%02i%02i%02i%02i",init.rootpath,title,
+        sprintf(stamp,"%ssnap"PATHSEPSTR"%s_%04i%02i%02i%02i%02i%02i",init.rootpath,title,
             t.tm_year+1900,t.tm_mon+1,t.tm_mday,t.tm_hour,t.tm_min,t.tm_sec);
         // more than one in a second: _2, _3, ...
         sprintf(name,"%s.png",stamp);
@@ -607,7 +606,7 @@ static void cbuf_seen(dword addr)
     rst.cbufseenfirst[old]=rst.cbufseenlast[old]=rst.myframe;
 }
 
-static void setbuffer(int i,dword c0,dword c1)
+static void rdp_setbuffer(int i,dword c0,dword c1)
 {
     dword addr=address(c1);
 
@@ -1195,6 +1194,17 @@ int txt_checkalpha(byte *dst,int dx,int dy)
         if(a<0xf0000000) return(1);
     }
     return(0);
+}
+
+// A texture rectangle drawn 1:1 from whole texels of an unshifted tile: the
+// RDP samples each texel's centre, its filter blends nothing, and the
+// texels reach the screen as they are. Drawn larger here, it is point
+// sampled and its texture is not bled (txt_keybleed).
+static int rect_texelexact(TexRect *tr,Tile *t)
+{
+    return(rst.s_cycles<=2 && !t->shifts && !t->shiftt &&
+           fabsf(tr->s1)==1024.0f && fabsf(tr->t1)==1024.0f &&
+           fmodf(tr->s0,32.0f)==0.0f && fmodf(tr->t0,32.0f)==0.0f);
 }
 
 // A transparent texel (alpha 0) next to visible ones takes their average
@@ -2237,8 +2247,11 @@ void txt_loaddata(Texture *txt,Tile *t)
             // convert to RGBA
             txt_convert(s,t);
         }
-        // made for a texture rectangle: no colour from its transparent texels
-        if(rst.rectmode==1) txt_keybleed(s,t->xs,t->ys);
+        // made for a texture rectangle: no colour from its transparent texels.
+        // Not for one drawn 1:1 (point sampled, rect_texelexact): its
+        // transparent texels can show as they are, and Mario Kart 64's player
+        // select portraits had a green or brown halo of the bled colours.
+        if(rst.rectmode==1 && !rect_texelexact(&rst.texrect,t)) txt_keybleed(s,t->xs,t->ys);
     }
 
     // check for alpha
@@ -2727,7 +2740,7 @@ void drawprims(int p,int i0,int i1)
     }
 
     // draw
-    x_rectclamp(rst.rectmode==1 && (rst.rectclamp&1),rst.rectmode==1 && (rst.rectclamp&2));
+    x_rectclamp(rst.rectmode==1 && (rst.rectclamp&1),rst.rectmode==1 && (rst.rectclamp&2),rst.rectmode==1 && (rst.rectclamp&4));
     if(COM.dualtxt)
     {
         if(st.dumpgfx) logd("DUALTXT! ");
@@ -2830,7 +2843,7 @@ static void drawprims_n64(int i0,int i1)
     if(st.dumpgfx) logd("\n+FLUSH n64comb cycles:%i tex:%i blend:%04X/%04X rect:%i",
         n64cycles,COM.texenable,rst.s_blend1,rst.s_blend2,rect);
 
-    x_rectclamp(rect && (rst.rectclamp&1),rect && (rst.rectclamp&2));
+    x_rectclamp(rect && (rst.rectclamp&1),rect && (rst.rectclamp&2),rect && (rst.rectclamp&4));
     x_begin(X_TRIANGLES);
     for(i=i0;i<i1;i++)
     {
@@ -3562,6 +3575,10 @@ void rdp_texrect(TexRect *tr)
         int   c=0;
         if(!t->shifts && fminf(u0,u1)>=os-16.0f && fmaxf(u0,u1)<=os+32.0f*t->xs+16.0f) c|=1;
         if(!t->shiftt && fminf(v0,v1)>=ot-16.0f && fmaxf(v0,v1)<=ot+32.0f*t->ys+16.0f) c|=2;
+        // 1:1 from whole texels: point sampled (x_rectclamp), see
+        // rect_texelexact. Filtered at 2x, Mario Kart 64's player select
+        // portraits had a halo.
+        if(rect_texelexact(tr,t)) c|=4;
         if(c!=rst.rectclamp) { flushprims(); rst.rectclamp=c; }
     }
 
@@ -6264,8 +6281,7 @@ static void opendisplay(void)
     x_init();
     //x_open(NULL,NULL,init.gfxwid,init.gfxhig,2,1);
       {
-         extern void *hwndMain; // void* since windows.h not included
-         x_open(NULL,hwndMain,init.gfxwid,init.gfxhig,2,1);
+         x_open(NULL,NULL,init.gfxwid,init.gfxhig,2,1);
       }
     rst.fullscreen=1;
 
@@ -6857,7 +6873,7 @@ int rdp_cmd(dword *cmd)
             rdp_present();
         }
         if(rst.rtt_on && (address(cmd[1])&0x1fffffff)!=rst.rtt_addr) rtt_end();
-        setbuffer(RDP_BUF_C,cmd[0],cmd[1]);
+        rdp_setbuffer(RDP_BUF_C,cmd[0],cmd[1]);
         if(!rst.rtt_on && rtt_offscreen()) rtt_begin(RTT_H);
         // the frame's own target: the first screen-width one that is not
         // the z image (rtt_secondscreen)
@@ -6884,10 +6900,10 @@ int rdp_cmd(dword *cmd)
         }
         break;
     case 0xfe: // RDP_SETZIMG
-        setbuffer(RDP_BUF_Z,cmd[0],cmd[1]);
+        rdp_setbuffer(RDP_BUF_Z,cmd[0],cmd[1]);
         break;
     case 0xfd: // RDP_SETTIMG
-        setbuffer(RDP_BUF_TXT,cmd[0],cmd[1]);
+        rdp_setbuffer(RDP_BUF_TXT,cmd[0],cmd[1]);
         logd("\n+tile settimg bpp=%s fmt=%s wid=%i %08X",
             bpp[rst.bufbpp[RDP_BUF_TXT]],
             fmt[rst.buffmt[RDP_BUF_TXT]],
@@ -8186,7 +8202,7 @@ static void bg_draw(dword base,int fmt,int siz,int pal,int imgw,int imgh,
     // set after their flush. Yoshi's Story repaints tile columns with
     // texrects while it scrolls, and the next layers were drawn clamped:
     // one vanished (its transparent edge), one showed its edge row stretched
-    x_rectclamp(0,0);
+    x_rectclamp(0,0,0);
     x_vxcolor4(1.0f,1.0f,1.0f,1.0f);
     x_begin(X_QUADS);
     x_vxtex(u0,v0); x_vxpos(frx*oxm+oxa,fry*oym+oya,1.0);

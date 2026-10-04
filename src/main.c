@@ -1,23 +1,16 @@
-#include "stdsdk.h" // includes ultra.h
-#include "listview.h" // includes ultra.h
+#include "ultra.h"
+#include "version.h"
 #include "bootlog.h"
-extern HWND hwndMain;
+#include "ui.h"
 
 // startup settings
 char  startcmd[1024];
 char  startrom[MAXFILE];
 
-static HANDLE emuthreadhandle;
 
 extern char romfilename[];
 
 int godisabled;
-
-// used by SOUND.C for directsound init
-void *main_gethwnd(void)
-{
-    return(hwndMain);
-}
 
 void printcopyright(void)
 {
@@ -38,7 +31,7 @@ void debugmessage(char *txt)
     static char last[1024];
     if(!txt)
     {
-        AddDebugLine(NULL,0);
+        ui_debugline(NULL);
         return;
     }
     if(strncmp(txt,last,sizeof(last)-1))
@@ -54,7 +47,7 @@ void debugmessage(char *txt)
         memcpy(tmp,last,i+1);
         if(i>0 && tmp[i-1]=='\n') tmp[i-1]=0; // remove enter
 
-        AddDebugLine(tmp,0);
+        ui_debugline(tmp);
     }
 }
 
@@ -107,26 +100,6 @@ int main_executing(void)
     return(st.executing);
 }
 
-// Waits up to ms for the emulation thread, letting its SendMessage calls
-// through. That thread writes the status bar counters and the log list with
-// SendMessage, which only returns once this (the window) thread takes the
-// message; a plain Sleep here left it stuck in the call, where it never saw
-// the break. Top Gear Overdrive (no idle time, counters sent every frame):
-// F6 stopped the game, timed out and saved nothing.
-static void main_wait(int ms)
-{
-    MSG   msg;
-    DWORD start=GetTickCount();
-    for(;;)
-    {
-        int left=ms-(int)(GetTickCount()-start);
-        // sent messages only: posted ones stay queued for the message loop
-        PeekMessage(&msg,NULL,0,0,PM_NOREMOVE|PM_QS_SENDMESSAGE);
-        if(left<=0) break;
-        MsgWaitForMultipleObjects(0,NULL,FALSE,left>10?10:left,QS_SENDMESSAGE);
-    }
-}
-
 // starts execution (might take a while)
 int main_start(void)
 {
@@ -149,7 +122,7 @@ int main_start(void)
     for(i=0;i<500;i+=10)
     {
         if(st.executing) return(0);
-        main_wait(10);
+        ui_wait(10);
     }
 
     // execution did not start (emu stuck?)
@@ -165,11 +138,11 @@ int main_stop(void)
 
     st.started=0;
 
-    SetThreadPriority(emuthreadhandle,THREAD_PRIORITY_HIGHEST);
+    ui_emupriority(1);
 
     if(!main_executing())
     {
-        SetThreadPriority(emuthreadhandle,THREAD_PRIORITY_NORMAL);
+        ui_emupriority(0);
         return(0);
     }
 
@@ -177,10 +150,10 @@ int main_stop(void)
     for(i=0;i<50;i++)
     {
         st.nicebreak=1;
-        main_wait(10);
+        ui_wait(10);
         if(!main_executing())
         {
-            SetThreadPriority(emuthreadhandle,THREAD_PRIORITY_NORMAL);
+            ui_emupriority(0);
             return(0);
         }
     }
@@ -189,10 +162,10 @@ int main_stop(void)
     for(i=0;i<100;i++)
     {
         cpu_break();
-        main_wait(10);
+        ui_wait(10);
         if(!main_executing())
         {
-            SetThreadPriority(emuthreadhandle,THREAD_PRIORITY_NORMAL);
+            ui_emupriority(0);
             return(0);
         }
     }
@@ -201,7 +174,7 @@ int main_stop(void)
 //    exception("main_stop failed (breakout=%i, bailout=%i, exec=%i)!",st.breakout,st.bailout,st.executing);
     flushdisplay();
 
-    SetThreadPriority(emuthreadhandle,THREAD_PRIORITY_NORMAL);
+    ui_emupriority(0);
     return(1);
 }
 
@@ -295,37 +268,11 @@ void main_show3dfx(void)
     }
 }
 
-LRESULT CALLBACK thread_window_proc (HWND hwnd, UINT iMsg, WPARAM wParam, LPARAM lParam)
-{
-     switch (iMsg)
-     {
-          case WM_CREATE :
-               return 0;
-
-          case WM_SIZE :
-               return 0;
-
-          case WM_PAINT :
-               {
-                   PAINTSTRUCT ps;
-                   BeginPaint(hwnd, &ps);
-                   EndPaint(hwnd, &ps);
-               }
-               return 0;
-
-          case WM_DESTROY :
-               PostQuitMessage (0) ;
-               return 0 ;
-     }
-
-     return DefWindowProc (hwnd, iMsg, wParam, lParam) ;
-}
-
 void help(void)
 {
     if(!RELEASE)
     {
-        MessageBox(NULL,
+        ui_message("UltraHLE",
                "usage: ULTRA [options] <romfile> [command ; command ; ...]\n"
                "\n"
                "options:\n"
@@ -338,12 +285,12 @@ void help(void)
                "-s   shutdown glide when returning to console (F12) instead\n"
                "     of just flipping screen (for Banshee)\n"
                "-n   no file mapping for preflipped roms (load whole rom)\n"
-               "-c   show console\n"
-               ,"UltraHLE",MB_OK);
+               "-c   show console\n");
     }
 }
 
-// appends '\' to path if it doesn't contain it
+// appends the folder separator to path if it doesn't end with one; on Linux
+// a Windows path from ultra.ini gets '/' for its '\'s first
 void fixpath(char *path,int striplastname)
 {
     char *p;
@@ -351,18 +298,21 @@ void fixpath(char *path,int striplastname)
     {
         return;
     }
+#ifndef _WIN32
+    for(p=path;*p;p++) if(*p=='\\') *p='/';
+#endif
     if(striplastname)
     {
         // strip exe name from above
         p=path+strlen(path);
-        while(p>path+1 && *p!=':' && *p!='\\')
+        while(p>path+1 && *p!=':' && *p!=PATHSEP)
         {
             p--;
         }
     }
     else p=path+strlen(path)-1;
-    // append '\\' if not at end
-    if(p[0]!='\\') *++p='\\';
+    // append the separator if not at end
+    if(p[0]!=PATHSEP) *++p=PATHSEP;
     // end string
     p[1]=0;
 }
@@ -371,9 +321,9 @@ void fixpath(char *path,int striplastname)
 // inside "..." belong to the argument and the quotes are removed, so
 // "C:\Program Files\UltraHLE\UltraHLE64.exe" is one argument. Returns 0 at
 // the end of the line.
-static int nextarg(char **cmd,char *out,int size)
+static int nextarg(const char **cmd,char *out,int size)
 {
-    char *s=*cmd;
+    const char *s=*cmd;
     int   n=0,quoted=0;
 
     while(*s && *s<=32) s++;
@@ -391,15 +341,15 @@ static int nextarg(char **cmd,char *out,int size)
 
 void main_startup(void)
 {
-    char *cmd;
+    const char *cmd;
     char  arg[MAXFILE];
     int   showhelp=0;
     int   romname=0;
     int   a;
 
-    cmd=GetCommandLine();
+    cmd=ui_commandline();
 
-    GetModuleFileName(NULL,init.rootpath,sizeof(init.rootpath));
+    ui_exepath(init.rootpath,sizeof(init.rootpath));
     fixpath(init.rootpath,1);
 
     // defaults
@@ -412,8 +362,8 @@ void main_startup(void)
     // command line options
     while(nextarg(&cmd,arg,sizeof(arg)))
     {
-        // check for '-' or '/'
-        if(*arg=='-' || *arg=='/')
+        // check for '-' or '/' ('-' only on Linux, where a path starts with '/')
+        if(*arg=='-' || (*arg=='/' && PATHSEP!='/'))
         {
             switch(arg[1])
             {
@@ -477,7 +427,7 @@ void main_thread(void)
 {
     static char romname[256];
 
-    emuthreadhandle=GetCurrentThread();
+    ui_setemuthread();
 
     bootlog("cmd_init");
     cmd_init();

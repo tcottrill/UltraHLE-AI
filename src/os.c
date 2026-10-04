@@ -1341,7 +1341,7 @@ int osEPiStartDma(dword m_pihandle,dword m_iomesg,dword flag)
 
 int osContInit(dword m_queue,dword m_bitpattern, dword m_status)
 {
-    int i;
+    int i,pattern;
 
     logo(BLUE"osContInit(%08X,%08X,%08X)\n",m_queue,m_bitpattern,m_status);
 
@@ -1353,15 +1353,16 @@ int osContInit(dword m_queue,dword m_bitpattern, dword m_status)
     // status 0x01 (a pak inserted, 0x02 with ultra.ini pak=none), errno 0
     // (bytes 00 05 | 01 | 00)
     mem_write32(m_status+0,cart.pak==PAK_NONE?0x00050200:0x00050100); // pak inserted or not (pif.c)
-    if(m_bitpattern) mem_write8(m_bitpattern,1<<0);
-    if(0)
+    // controllers 2-4 while an Xbox controller is on them: standard pad
+    // with a Rumble Pak unless pak=none (pif.c answers the same)
+    pattern=1;
+    for(i=1;i<PAD_PORTS;i++)
     {
-        // controller 2-4 present
-        mem_write32(m_status+4,0x00010000);
-        mem_write32(m_status+8,0x00010000);
-        mem_write32(m_status+12,0x00010000);
-        if(m_bitpattern) mem_write8(m_bitpattern,15<<0);
+        if(!pad_present(i)) continue;
+        mem_write32(m_status+i*4,cart.pak==PAK_NONE?0x00050200:0x00050100);
+        pattern|=1<<i;
     }
+    if(m_bitpattern) mem_write8(m_bitpattern,pattern);
 
     return(0);
 }
@@ -1374,6 +1375,7 @@ int osContReset(dword m_queue,dword m_status)
     logo(BLUE"osContReset(%08X,%08X)\n",m_queue,m_status);
     for(i=0;i<4;i++) mem_write32(m_status+i*4,0);
     mem_write32(m_status+0,cart.pak==PAK_NONE?0x00050200:0x00050100); // pak inserted or not (pif.c)
+    for(i=1;i<PAD_PORTS;i++) if(pad_present(i)) mem_write32(m_status+i*4,cart.pak==PAK_NONE?0x00050200:0x00050100);
     return(0);
 }
 

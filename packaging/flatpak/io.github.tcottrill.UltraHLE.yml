@@ -1,0 +1,92 @@
+# UltraHLE Flatpak manifest, modelled on AAE's (packaging/flatpak/
+# io.github.tcottrill.AAE.yml in the AAE repo).
+#
+# Build and export a single-file bundle with Scripts/linux/build-flatpak.sh
+# (in WSL; it handles rofiles-fuse and builds off /mnt/c). On the Steam Deck:
+#   flatpak install --user ultrahle.flatpak
+#   flatpak run io.github.tcottrill.UltraHLE /home/deck/UltraHLE/roms/game.z64
+#
+# Why a Flatpak: a binary built against the dev box's glibc does not run on
+# SteamOS's older one; built inside the SDK it depends only on the runtime.
+#
+# No ROMs are bundled. ultra.ini (the per-game settings) is.
+
+app-id: io.github.tcottrill.UltraHLE
+runtime: org.freedesktop.Platform
+runtime-version: '24.08'
+sdk: org.freedesktop.Sdk
+command: ultrahle-launcher.sh
+
+finish-args:
+  # X11: gamescope runs every game in SteamOS's game mode inside its own
+  # XWayland, and the window/GL code (from AAE) is X11+GLX.
+  - --socket=x11
+  - --share=ipc
+  # GPU
+  - --device=dri
+  # sound: PipeWire through its PulseAudio protocol on SteamOS
+  - --socket=pulseaudio
+  # gamepads: evdev needs /dev/input in the sandbox (--device=input), and
+  # Steam Input's virtual pads plus rumble come through --device=all. As with
+  # AAE, the user may need to be in the 'input' group on the host.
+  - --device=input
+  - --device=all
+  # ROMs anywhere in home, on the SD card or USB storage (read only)
+  - --filesystem=home:ro
+  - --filesystem=/run/media:ro
+  # ~/UltraHLE/roms: where ROMs are meant to go, made on first start
+  - --filesystem=~/UltraHLE:create
+
+modules:
+  # GLU and GLEW are not in the Freedesktop runtime; the system glew.h
+  # includes <GL/glu.h>. Same modules as AAE's manifest.
+  - name: glu
+    buildsystem: meson
+    sources:
+      - type: git
+        url: https://gitlab.freedesktop.org/mesa/glu.git
+        tag: glu-9.0.3
+
+  - name: glew
+    buildsystem: simple
+    build-commands:
+      - make GLEW_PREFIX=/app GLEW_DEST=/app LIBDIR=/app/lib -j${FLATPAK_BUILDER_N_JOBS}
+      - make install GLEW_PREFIX=/app GLEW_DEST=/app LIBDIR=/app/lib
+    sources:
+      - type: archive
+        url: https://github.com/nigels-com/glew/releases/download/glew-2.2.0/glew-2.2.0.tgz
+        sha256: d4fc82893cfb00109578d0a1a2337fb8ca335b3ceccf97b97e5cc7f08e4353e1
+
+  - name: ultrahle
+    buildsystem: simple
+    # Only what the build needs: the repo also holds ROMs, decompilations
+    # and Windows build output, gigabytes the sandbox has no use for.
+    sources:
+      - type: dir
+        path: ../../src
+        dest: src
+      - type: file
+        path: ../../CMakeLists.txt
+      - type: file
+        path: ../../Build/ULTRA.INI
+        dest-filename: ultra.ini
+      - type: dir
+        path: .
+        dest: packaging
+    build-commands:
+      # CMAKE_PREFIX_PATH=/app: find_package(GLEW) must see the module above.
+      # env -u SOURCE_DATE_EPOCH: flatpak-builder pins it, and GCC would then
+      # stamp every build with the same __DATE__ (as in AAE's manifest).
+      - cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=/app
+      - env -u SOURCE_DATE_EPOCH cmake --build build
+    post-install:
+      - install -Dm755 Build/linux/ultrahle /app/bin/ultrahle
+      - install -Dm755 packaging/ultrahle-launcher.sh /app/bin/ultrahle-launcher.sh
+      # binary copy: ultra.ini's Japanese section names are Shift-JIS bytes
+      - install -Dm644 ultra.ini /app/share/ultrahle/ultra.ini
+      - install -Dm644 packaging/io.github.tcottrill.UltraHLE.desktop
+          /app/share/applications/io.github.tcottrill.UltraHLE.desktop
+      - install -Dm644 packaging/io.github.tcottrill.UltraHLE.metainfo.xml
+          /app/share/metainfo/io.github.tcottrill.UltraHLE.metainfo.xml
+      - install -Dm644 packaging/io.github.tcottrill.UltraHLE.png
+          /app/share/icons/hicolor/256x256/apps/io.github.tcottrill.UltraHLE.png

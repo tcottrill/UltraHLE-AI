@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=UltraHLE
+GenericName=N64 Emulator
+Comment=Nintendo 64 high level emulator
+Exec=ultrahle-launcher.sh %f
+Icon=io.github.tcottrill.UltraHLE
+Terminal=false
+Categories=Game;Emulator;
+Keywords=n64;nintendo;emulator;

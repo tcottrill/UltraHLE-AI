@@ -38,7 +38,6 @@ LPDWORD mainthreadid;
 
 extern HWND hwndList;                  // Handle to Rom List View
 extern HWND hwndDebug;                 // Handle to Debug List View
-extern ROMLIST *romList;               // Pointer to Rom List Information
 
 extern Init init;
 

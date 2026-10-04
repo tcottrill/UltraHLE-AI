@@ -4,6 +4,20 @@
 extern "C" {
 #endif
 
+// one ROM list entry; inifile_readtemp fills in alttitle and comment from
+// ultra.ini (the ROM browser shows them)
+typedef struct _RomList
+{
+    char  name[MAX_PATH];                // ROM Name
+    char  alttitle[MAX_PATH];             // Alternate ROM Name
+    char  country;                       // Country Code
+    char  filename[MAX_PATH];            // ROM File Name
+    char  comment[MAX_PATH];             // Comments on ROM Functionality
+    dword dwFileSize;                    // ROM File Size
+} ROMLIST;
+
+extern ROMLIST romList;
+
 void inifile_command(char* cmd);
 void inifile_read(char* cartnamep);
 void inifile_readtemp(char* cartnamep);

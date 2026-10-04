@@ -384,5 +384,14 @@
     <ClCompile Include="..\src\xgl\xgl_window.c">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="..\src\xgl\xgl_wgl.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\ui_win32.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\pad_win32.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
 </Project>

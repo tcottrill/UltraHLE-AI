@@ -6,17 +6,17 @@
 #ifndef _BOOTLOG_H_
 #define _BOOTLOG_H_
 
-#include <windows.h>
-
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+struct _EXCEPTION_POINTERS; // windows.h
 
 void  bootlog_begin(void);             // pick the folder, write the system report
 void  bootlog(const char *fmt,...);    // one timestamped line
 void  bootlog_modules(const char *when); // every module loaded in the process
 char *bootlog_path(char *out,const char *name); // name in the log folder
-void  bootlog_crash(EXCEPTION_POINTERS *ep);    // crash line, modules, ultra.dmp
+void  bootlog_crash(struct _EXCEPTION_POINTERS *ep); // Windows only    // crash line, modules, ultra.dmp
 void  bootlog_ready(void);             // startup done: stop first-chance logging
 
 #ifdef __cplusplus

@@ -150,6 +150,9 @@
     <ClCompile Include="..\src\xgl\xgl_state.c" />
     <ClCompile Include="..\src\xgl\xgl_tex.c" />
     <ClCompile Include="..\src\xgl\xgl_window.c" />
+    <ClCompile Include="..\src\xgl\xgl_wgl.c" />
+    <ClCompile Include="..\src\ui_win32.c" />
+    <ClCompile Include="..\src\pad_win32.c" />
     <ClCompile Include="..\src\zip\miniz.c" />
     <ClCompile Include="..\src\zip\romzip.c" />
   </ItemGroup>

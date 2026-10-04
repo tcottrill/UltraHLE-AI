@@ -287,13 +287,10 @@ void x_rtt_end(void)
 // with black bars (fit logic as in C64Emu ComputePresentViewport).
 void xgl_fbo_present(void)
 {
-    RECT  rc;
     int   ww,wh,w,h,x,y,xs=XGL_MAINXS,ys=XGL_MAINYS;
     float sx,sy,s;
 
-    GetClientRect(xg.hwnd,&rc);
-    ww=rc.right;
-    wh=rc.bottom;
+    xgl_ctx_size(&ww,&wh);
 
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER,0);
     glBindFramebuffer(GL_READ_FRAMEBUFFER,xg.fbo);

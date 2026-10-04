@@ -824,6 +824,11 @@
 
             break;
 
+         case WM_DEVICECHANGE:
+            // an Xbox controller may have come or gone: poll its slot now
+            pad_devicechange();
+            return( DefWindowProc( hwnd, message, wParam, lParam ) );
+
          case WM_ACTIVATE:
 
             // This will switch the screen accordingly in BOTH losing and

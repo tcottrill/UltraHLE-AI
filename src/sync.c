@@ -1,7 +1,9 @@
 // This file is a mess, look away :)
 // real pain this audio syncronization! :)
 
+#ifdef _WIN32
 #include <windows.h>
+#endif
 #include "ultra.h"
 
 /* Sync routines:

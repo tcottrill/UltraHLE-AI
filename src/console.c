@@ -113,6 +113,11 @@ void con_deinit(void)
     FreeConsole();
 }
 
+void con_title(const char *title)
+{
+    SetConsoleTitle(title);
+}
+
 int  con_cols(void)
 {
     return(con.sx);

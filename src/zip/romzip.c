@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include "miniz.h"
 #include "romzip.h"
+#include "../compat.h"
 
 static const char *romexts[]={".z64",".v64",".n64",".rom",".bin",".u64",NULL};
 

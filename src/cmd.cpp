@@ -1,6 +1,5 @@
 // Console commands processor
 #include "ultra.h"
-#include <direct.h>
 #include <vector>
 #include <string>
 #include <map>
@@ -320,7 +319,7 @@ static void statefile(char *buf, size_t n, const char *name)
     {
         snprintf(dir, sizeof(dir), "%sstates", init.rootpath);
         _mkdir(dir);
-        snprintf(buf, n - 5, "%s\\%s", dir, name);
+        snprintf(buf, n - 5, "%s" PATHSEPSTR "%s", dir, name);
     }
     if (!strchr(name, '.')) strcat(buf, ".sav");
 }

@@ -1,6 +1,6 @@
-#include "stdsdk.h"
+#include "ultra.h"
 #include "console.h"
-extern HWND hwndStatus;
+#include "ui.h"
 extern char szBuffer[];
 
 #define STATLINES 20
@@ -430,27 +430,27 @@ void view_statusbar(void)
         if( st.frames )
         {
           sprintf( szBuffer, "FRAME: %8u", (int)st.frames );
-          SendMessage( hwndStatus, SB_SETTEXT, 1, (LPARAM)szBuffer );
+          ui_statustext( 1, szBuffer );
         }
         else
         {
           sprintf( szBuffer, "CYCLE: %8u", (int)st.cputime );
-          SendMessage( hwndStatus, SB_SETTEXT, 1, (LPARAM)szBuffer );
+          ui_statustext( 1, szBuffer );
         }
 
         i=ssi; i=((unsigned)i)%STATS;
         if( ss[i].fps )
         {
           sprintf( szBuffer, "CPU: %5.1f%%", ss[i].p_cpu+ss[i].p_misc );
-          SendMessage( hwndStatus, SB_SETTEXT, 2, (LPARAM)szBuffer );
+          ui_statustext( 2, szBuffer );
           sprintf( szBuffer, "GFX: %5.1f%%", ss[i].p_gfx );
-          SendMessage( hwndStatus, SB_SETTEXT, 3, (LPARAM)szBuffer );
+          ui_statustext( 3, szBuffer );
           sprintf( szBuffer, "SND: %5.1f%%", ss[2].p_audio );
-          SendMessage( hwndStatus, SB_SETTEXT, 4, (LPARAM)szBuffer );
+          ui_statustext( 4, szBuffer );
           sprintf( szBuffer, "IDLE: %5.1f%%", ss[i].p_idle );
-          SendMessage( hwndStatus, SB_SETTEXT, 5, (LPARAM)szBuffer );
+          ui_statustext( 5, szBuffer );
           sprintf( szBuffer, "FPS: %5.1f", ss[i].fps );
-          SendMessage( hwndStatus, SB_SETTEXT, 6, (LPARAM)szBuffer );
+          ui_statustext( 6, szBuffer );
         }
     }
 }
@@ -682,7 +682,7 @@ void view_open(void)
     if(init.showconsole && !RELEASE)
     {
         con_init();
-        SetConsoleTitle( "UltraHLE Debug Console" );
+        con_title( "UltraHLE Debug Console" );
     }
     else
     {

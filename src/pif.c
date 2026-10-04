@@ -4,7 +4,6 @@
 
 #include "ultra.h"
 #include <stdio.h>
-#include <direct.h>
 
 #define MEMPAK_SIZE 0x8000
 #define EEPROM_SIZE 0x800  // file is always 16Kbit, as Mupen64Plus .eep
@@ -108,7 +107,7 @@ void pif_savename(char *dst,const char *ext)
         char dir[MAXFILE+8];
         sprintf(dir,"%ssaves",init.rootpath);
         _mkdir(dir);
-        sprintf(dst,"%s\\%s.%s",dir,title,ext);
+        sprintf(dst,"%s"PATHSEPSTR"%s.%s",dir,title,ext);
     }
 }
 
@@ -164,60 +163,58 @@ void pif_process(int padport)
             int tx=t&0x3f,rx=pif_get(p+1)&0x3f;
             int cmd=pif_get(p+2);
             int r=p+2+tx;              // reply bytes
+            int pl=ch-padport;         // controller 1-4 = 0-3 on channels padport..
+            int pak;                   // accessory in that controller
             if(r+rx>63) break;
-            if(ch==padport && (cmd==0x00 || cmd==0xff) && rx>=3)
+            if(ch>=4 || pl<0 || pl>=PAD_PORTS || (pl>0 && !pad_present(pl))) pl=-1;
+            // controller 1 has the ultra.ini accessory, controllers 2-4 (Xbox
+            // controllers) a Rumble Pak; pak=none leaves them all empty
+            pak=(pl==0 || cart.pak==PAK_NONE)?cart.pak:PAK_RUMBLE;
+            if(pl>=0 && (cmd==0x00 || cmd==0xff) && rx>=3)
             { // controller status: standard pad, an accessory inserted or not
-                pif_set(r,0x05); pif_set(r+1,0x00); pif_set(r+2,cart.pak==PAK_NONE?0x02:0x01);
+                pif_set(r,0x05); pif_set(r+1,0x00); pif_set(r+2,pak==PAK_NONE?0x02:0x01);
             }
-            else if(ch==padport && (cmd==0x02 || cmd==0x03) && cart.pak==PAK_NONE)
-            { // no accessory: nothing answers the pak read/write
-                pif_set(p+1,(byte)(pif_get(p+1)|0x80));
-            }
-            else if(ch==padport && cmd==0x02 && tx>=3 && rx>=33 && cart.pak==PAK_RUMBLE)
-            { // Rumble Pak read (Mupen64Plus rumblepak.c): its ID area at
-              // 0x8000 reads 0x80, what libultra's osMotorInit looks for;
-              // a Controller Pak echoes the 0xFE it writes first, and rumble
-              // only games then say that pak isn't for them (Chameleon Twist)
-                int  addr=((pif_get(p+3)<<8)|pif_get(p+4))&0xffe0;
-                byte data[32];
-                int  i;
-                memset(data,(addr>=0x8000 && addr<0x9000)?0x80:0x00,32);
-                for(i=0;i<32;i++) pif_set(r+i,data[i]);
-                pif_set(r+32,mempak_crc(data));
-            }
-            else if(ch==padport && cmd==0x03 && tx>=35 && rx>=1 && cart.pak==PAK_RUMBLE)
-            { // Rumble Pak write: the motor at 0xC000 (no host rumble)
-                int  addr=((pif_get(p+3)<<8)|pif_get(p+4))&0xffe0;
-                byte data[32];
-                int  i;
-                static int seen;
-                for(i=0;i<32;i++) data[i]=pif_get(p+5+i);
-                if(addr==0xc000 && data[31] && !seen) { seen=1; print("note: Rumble Pak motor on\n"); }
-                pif_set(r,mempak_crc(data));
-            }
-            else if(ch==padport && cmd==0x01 && rx>=4)
+            else if(pl>=0 && cmd==0x01 && rx>=4)
             { // read buttons and stick
-                dword d=pad_getdata(0);
+                dword d=pad_getdata(pl);
                 pif_set(r,(byte)(d>>24)); pif_set(r+1,(byte)(d>>16));
                 pif_set(r+2,(byte)(d>>8)); pif_set(r+3,(byte)d);
             }
-            else if(ch==padport && cmd==0x02 && tx>=3 && rx>=33)
-            { // Controller Pak read: 32 bytes and their CRC
+            else if(pl>=0 && (cmd==0x02 || cmd==0x03) && pak==PAK_NONE)
+            { // no accessory: nothing answers the pak read/write
+                pif_set(p+1,(byte)(pif_get(p+1)|0x80));
+            }
+            else if(pl>=0 && cmd==0x02 && tx>=3 && rx>=33)
+            { // pak read: 32 bytes and their CRC. The Controller Pak's 32KB
+              // below 0x8000; the Rumble Pak's ID area at 0x8000 reads 0x80
+              // (Mupen64Plus rumblepak.c), what libultra's osMotorInit looks
+              // for. The Controller Pak answers it too, so games that want a
+              // Rumble Pak find one and saves still work (a real Controller
+              // Pak echoes the 0xFE osMotorInit writes, and games then ask
+              // for a Rumble Pak). Only games that tell the two apart by that
+              // probe now see a Rumble Pak.
                 int  addr=((pif_get(p+3)<<8)|pif_get(p+4))&0xffe0;
                 byte data[32];
                 int  i;
-                if(addr<MEMPAK_SIZE) memcpy(data,mempak+addr,32);
-                else memset(data,0,32); // accessory id area: not a Rumble Pak
+                if(addr<MEMPAK_SIZE && pak==PAK_MEMORY) memcpy(data,mempak+addr,32);
+                else memset(data,(addr>=0x8000 && addr<0x9000)?0x80:0x00,32);
                 for(i=0;i<32;i++) pif_set(r+i,data[i]);
                 pif_set(r+32,mempak_crc(data));
             }
-            else if(ch==padport && cmd==0x03 && tx>=35 && rx>=1)
-            { // Controller Pak write: 32 bytes, reply is their CRC
+            else if(pl>=0 && cmd==0x03 && tx>=35 && rx>=1)
+            { // pak write: 32 bytes, reply is their CRC. 0xC000 is the
+              // Rumble Pak motor (libultra writes 32 times 0 or 1)
                 int  addr=((pif_get(p+3)<<8)|pif_get(p+4))&0xffe0;
                 byte data[32];
                 int  i;
                 for(i=0;i<32;i++) data[i]=pif_get(p+5+i);
-                if(addr<MEMPAK_SIZE && memcmp(mempak+addr,data,32))
+                if(addr==0xc000)
+                {
+                    static int seen;
+                    if(data[31] && !seen) { seen=1; print("note: Rumble Pak motor on\n"); }
+                    pad_rumble(pl,data[31]!=0);
+                }
+                else if(addr<MEMPAK_SIZE && pak==PAK_MEMORY && memcmp(mempak+addr,data,32))
                 {
                     memcpy(mempak+addr,data,32);
                     mempak_save();
@@ -254,7 +251,7 @@ void pif_process(int padport)
             else
             { // no device / unsupported: set the error bit in the rx byte
                 pif_set(p+1,(byte)(pif_get(p+1)|0x80));
-                if(ch==padport || ch==4)
+                if(pl==0 || ch==4)
                 {
                     static int seen[256];
                     if(!seen[cmd]) { seen[cmd]=1; print("pif: command %02X on channel %i not supported\n",cmd,ch); }

@@ -6,7 +6,6 @@
 
 #include "loadsave.h"
 #include "main.h" // ST:
-#include <direct.h>
 #include <stdio.h>
 
    // the states folder next to the exe (cmd.cpp's statefile), made when missing

@@ -23,7 +23,6 @@ void SelectAllDebugLines( void );
 
 HWND hwndList;                         // Handle to Rom List View
 HWND hwndDebug;                        // Handle to Debug List View
-ROMLIST romList;                       // Pointer to Rom List Information
    
 extern char szBuffer[];                // Temporary String Buffer
 extern HANDLE hInst;                   // Global Application Instance

@@ -530,7 +530,7 @@ void cpu_checkbranchbreak(dword addr,int type)
             }
             else if(type==BRANCH_RET)
             {
-                if(--(int)st.breakpoint[i].data<0)
+                if((int)--st.breakpoint[i].data<0)
                 {
                     cpu_breakpoint(i);
                 }
@@ -687,6 +687,7 @@ print("break!\n");
     }
 
     st.executing=0;
+    pad_rumbleoff(); // a game stopped with its Rumble Pak motor on
 
     view_status("ready");
     flushdisplay();

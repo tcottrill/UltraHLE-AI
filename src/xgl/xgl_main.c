@@ -9,8 +9,7 @@
 xgl_state xg;
 xt_stats  xgl_stats;
 
-static FILE          *logfile;
-static LARGE_INTEGER  timebase,timefreq;
+static FILE *logfile;
 
 /****************************************************************************
 ** utilities
@@ -37,7 +36,7 @@ void x_fatal(char *txt,...)
     va_end(ap);
     x_log("FATAL: %s\n",buf);
     bootlog("FATAL: %s",buf);
-    MessageBox(NULL,buf,"UltraHLE",MB_OK|MB_ICONERROR);
+    xgl_ctx_error(buf);
     exit(1);
 }
 
@@ -47,22 +46,7 @@ void *x_realloc(void *p,int newsize)  { return realloc(p,newsize); }
 void  x_free(void *blk)               { free(blk); }
 void  x_fastfpu(int fast)             { (void)fast; } // x87 precision switch not needed
 
-void x_timereset(void)
-{
-    QueryPerformanceFrequency(&timefreq);
-    QueryPerformanceCounter(&timebase);
-}
-
-int x_timeus(void)
-{
-    LARGE_INTEGER now;
-    if(!timefreq.QuadPart) x_timereset();
-    QueryPerformanceCounter(&now);
-    return (int)((now.QuadPart-timebase.QuadPart)*1000000/timefreq.QuadPart);
-}
-
 int   x_timems(void)                  { return x_timeus()/1000; }
-void  x_sleep(int ms)                 { Sleep(ms); }
 char *x_version(void)                 { return "OpenGL 3.3 core"; }
 int   x_query(void *hdc,void *hwnd)   { (void)hdc; (void)hwnd; return 0; }
 void  x_select(int which)             { (void)which; }
@@ -87,107 +71,17 @@ void x_getstats(xt_stats *s,int ssize)
 }
 
 /****************************************************************************
-** context
+** context: xgl_ctx_* are in xgl_wgl.c (Windows) or xgl_glx.c (Linux)
 */
 
 static int createcontext(void)
 {
-    static const int attribs[]=
-    {
-        WGL_CONTEXT_MAJOR_VERSION_ARB, 3,
-        WGL_CONTEXT_MINOR_VERSION_ARB, 3,
-        WGL_CONTEXT_PROFILE_MASK_ARB,  WGL_CONTEXT_CORE_PROFILE_BIT_ARB,
-        0
-    };
-    PIXELFORMATDESCRIPTOR pfd;
-    HGLRC temp;
-    int   fmt;
-
-    bootlog("gl: GetDC");
-    xg.hdc=GetDC(xg.hwnd);
-    if(!xg.hdc) { bootlog("gl: GetDC failed, error %lu",GetLastError()); return 0; }
-
-    // A window's pixel format can be set only once; the display is closed
-    // and reopened (hide3dfx), so keep the format already chosen.
-    if(!GetPixelFormat(xg.hdc))
-    {
-        memset(&pfd,0,sizeof(pfd));
-        pfd.nSize     =sizeof(pfd);
-        pfd.nVersion  =1;
-        pfd.dwFlags   =PFD_DRAW_TO_WINDOW|PFD_SUPPORT_OPENGL|PFD_DOUBLEBUFFER;
-        pfd.iPixelType=PFD_TYPE_RGBA;
-        pfd.cColorBits=32;
-        pfd.iLayerType=PFD_MAIN_PLANE;
-        bootlog("gl: ChoosePixelFormat");
-        fmt=ChoosePixelFormat(xg.hdc,&pfd);
-        if(!fmt) { bootlog("gl: ChoosePixelFormat failed, error %lu",GetLastError()); return 0; }
-        bootlog("gl: SetPixelFormat %d",fmt);
-        if(!SetPixelFormat(xg.hdc,fmt,&pfd))
-        {
-            bootlog("gl: SetPixelFormat failed, error %lu",GetLastError());
-            return 0;
-        }
-    }
-
-    // Bootstrap context, only to load wglCreateContextAttribsARB
-    // (same sequence as Tempest platform/windows/sys_gl.c CreateGLContext).
-    bootlog("gl: wglCreateContext");
-    temp=wglCreateContext(xg.hdc);
-    if(!temp) { bootlog("gl: wglCreateContext failed, error %lu",GetLastError()); return 0; }
-    if(!wglMakeCurrent(xg.hdc,temp))
-    {
-        bootlog("gl: wglMakeCurrent (bootstrap) failed, error %lu",GetLastError());
-        wglDeleteContext(temp);
-        return 0;
-    }
-    bootlog("gl: bootstrap context %s / %s / %s",glGetString(GL_VENDOR),
-            glGetString(GL_RENDERER),glGetString(GL_VERSION));
-    glewExperimental=GL_TRUE;
-    if(glewInit()!=GLEW_OK || !wglCreateContextAttribsARB)
-    {
-        bootlog("gl: glewInit or wglCreateContextAttribsARB failed");
-        wglMakeCurrent(NULL,NULL);
-        wglDeleteContext(temp);
-        return 0;
-    }
-
-    bootlog("gl: wglCreateContextAttribsARB 3.3 core");
-    xg.hrc=wglCreateContextAttribsARB(xg.hdc,0,attribs);
-    wglMakeCurrent(NULL,NULL);
-    wglDeleteContext(temp);
-    if(!xg.hrc) { bootlog("gl: 3.3 core context failed, error %lu",GetLastError()); return 0; }
-    if(!wglMakeCurrent(xg.hdc,xg.hrc))
-    {
-        bootlog("gl: wglMakeCurrent failed, error %lu",GetLastError());
-        return 0;
-    }
-
-    // Re-resolve entry points for the core context; glewInit leaves a
-    // harmless GL_INVALID_ENUM behind on core profiles.
-    glewExperimental=GL_TRUE;
-    if(glewInit()!=GLEW_OK) { bootlog("gl: glewInit (core) failed"); return 0; }
-    while(glGetError()!=GL_NO_ERROR) {}
-
+    if(!xgl_ctx_create()) return 0;
     x_log("GL_VERSION: %s\nGL_RENDERER: %s\n",glGetString(GL_VERSION),glGetString(GL_RENDERER));
     bootlog("gl: context ready %s / %s / %s",glGetString(GL_VENDOR),
             glGetString(GL_RENDERER),glGetString(GL_VERSION));
     bootlog_modules("after OpenGL context");
     return 1;
-}
-
-static void destroycontext(void)
-{
-    if(xg.hrc)
-    {
-        wglMakeCurrent(NULL,NULL);
-        wglDeleteContext(xg.hrc);
-        xg.hrc=NULL;
-    }
-    if(xg.hdc)
-    {
-        ReleaseDC(xg.hwnd,xg.hdc);
-        xg.hdc=NULL;
-    }
 }
 
 /****************************************************************************
@@ -207,8 +101,7 @@ int x_open(void *hdc,void *hwnd,int width,int height,int buffers,int vsync)
 {
     (void)hdc; (void)hwnd; (void)buffers;
 
-    xg.hwnd=(HWND)xgl_window();
-    if(!xg.hwnd) x_fatal("x_open: display window missing (xgl_createwindow not called)");
+    if(!xgl_window()) x_fatal("x_open: display window missing (xgl_createwindow not called)");
 
     if(!xg.glready)
     {
@@ -216,10 +109,10 @@ int x_open(void *hdc,void *hwnd,int width,int height,int buffers,int vsync)
         xg.ys=height;
         if(!createcontext())
         {
-            destroycontext();
+            xgl_ctx_destroy();
             x_fatal("OpenGL 3.3 core is required but could not be initialized.");
         }
-        if(wglSwapIntervalEXT) wglSwapIntervalEXT(vsync?1:0);
+        xgl_ctx_vsync(vsync);
 
         if(!xgl_fbo_create(width,height) || !xgl_shader_create() || !xgl_geom_create())
             x_fatal("x_open: OpenGL setup failed, see x.log");
@@ -233,7 +126,7 @@ int x_open(void *hdc,void *hwnd,int width,int height,int buffers,int vsync)
             if(!xgl_fbo_create(width,height))
                 x_fatal("x_open: OpenGL setup failed, see x.log");
         }
-        if(wglSwapIntervalEXT) wglSwapIntervalEXT(vsync?1:0);
+        xgl_ctx_vsync(vsync);
     }
 
     xg.xs=width;
@@ -297,7 +190,7 @@ void x_finish(void)
     x_flush();
     xgl_fbo_savefront();
     xgl_fbo_present();
-    SwapBuffers(xg.hdc);
+    xgl_ctx_swap();
     xgl_fbo_bind();
     x_reset();
     xg.frame++;
@@ -306,7 +199,7 @@ void x_finish(void)
 // 1 if the calling thread can use the GL context (the thread that renders)
 int x_hascontext(void)
 {
-    return(xg.open && wglGetCurrentContext()==xg.hrc);
+    return(xg.open && xgl_ctx_current());
 }
 
 // Only X_FB_RGBA8888 is supported (rdp.c screenshots). Row 0 is the top row;

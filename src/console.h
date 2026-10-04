@@ -10,6 +10,7 @@ extern "C" {
 void con_init(void);
 void con_initdummy(void);
 void con_deinit(void);
+void con_title(const char *title);
 
 int  con_resized(void);
 int  con_rows(void);

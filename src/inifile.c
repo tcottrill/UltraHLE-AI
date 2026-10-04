@@ -1,5 +1,6 @@
-#include "stdsdk.h"
-extern ROMLIST romList;
+#include "ultra.h"
+
+ROMLIST romList; // the ROM browser's current entry (inifile_readtemp)
 
 #define IFIS(x,str) if(!_memicmp(x,str,sizeof(str)-1))
 

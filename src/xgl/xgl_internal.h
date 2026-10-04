@@ -3,6 +3,7 @@
 #define XGL_INTERNAL_H
 
 #include "xgl_gl.h"
+#include "../compat.h"
 #include "../x.h"
 #include "xgl.h"
 
@@ -30,10 +31,7 @@ typedef struct
 
 typedef struct
 {
-    // display
-    HWND   hwnd;
-    HDC    hdc;
-    HGLRC  hrc;
+    // display (the window and context belong to xgl_wgl.c / xgl_glx.c)
     int    open;
     int    glready;        // context+shader+geometry exist (survives close/reopen)
     int    xs,ys;          // render size (the FBO)
@@ -76,7 +74,7 @@ typedef struct
     int    colortext1,text1text2;
     float  env[4];
     int    text1,text2;
-    int    rectclamp;   // x_rectclamp: bit 0 clamp s, bit 1 clamp t
+    int    rectclamp;   // x_rectclamp: bit 0 clamp s, bit 1 clamp t, bit 2 point sample
     int    fogtype;
     float  fogmin,fogmax,fogcolor[3];
     // N64 combiner (x_n64combine); n64cycles 0 = the x_combine modes
@@ -126,5 +124,14 @@ void   xgl_geom_destroy(void);
 void   xgl_geom_default(void);
 void   xgl_applyviewport(void);
 void   xgl_applydepth(void);
+
+// window system: xgl_wgl.c (Windows) or xgl_glx.c (Linux)
+int    xgl_ctx_create(void);           // GL 3.3 core on xgl_window(), current on this thread
+void   xgl_ctx_destroy(void);
+void   xgl_ctx_vsync(int on);
+void   xgl_ctx_swap(void);
+int    xgl_ctx_current(void);          // 1 if the context is current on this thread
+void   xgl_ctx_size(int *w,int *h);    // the window's client area
+void   xgl_ctx_error(const char *msg); // tells the user, before x_fatal exits
 
 #endif

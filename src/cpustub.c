@@ -5,7 +5,7 @@
 
 #include "ultra.h"
 
-#ifdef _M_X64
+#if defined(_M_X64) || defined(__x86_64__)
 
 void a_exec(void)              { c_exec(); } // "fast" mode runs the interpreter
 void a_clearcodecache(void)    { mem.groupnum=0; mem.codeused=0; }
