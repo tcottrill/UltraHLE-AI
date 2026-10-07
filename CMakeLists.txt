@@ -35,9 +35,11 @@ set(UHLE_CORE
 # sound.h, padin.h, xgl_ctx_*, bootlog.h)
 file(GLOB UHLE_LINUX src/linux/*.c src/linux/*.cpp src/linux/aae/*.cpp)
 
-add_executable(ultrahle ${UHLE_CORE} ${UHLE_LINUX})
+set(UHLE_FONT_CORE src/linux/font/winfont_impl.cpp)
+set(UHLE_FONT_GL src/linux/font/winfont_backend_gl.cpp)
+add_executable(ultrahle ${UHLE_CORE} ${UHLE_LINUX} ${UHLE_FONT_CORE} ${UHLE_FONT_GL})
 
-target_include_directories(ultrahle PRIVATE src src/xgl src/linux src/linux/aae)
+target_include_directories(ultrahle PRIVATE src src/xgl src/linux src/linux/aae src/linux/font)
 target_compile_definitions(ultrahle PRIVATE
     $<$<CONFIG:Release>:RELEASE=1 NDEBUG>)
 
@@ -68,3 +70,40 @@ target_link_libraries(ultrahle PRIVATE
 
 # next to ULTRA.INI, as on Windows
 set_target_properties(ultrahle PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/Build/linux)
+
+# Read-only UI assets live beside the executable, independently of ULTRAHLE_HOME.
+# Outputs and dependencies make an updated font/license propagate on the next build.
+set(UHLE_FONT_ASSET_DIR "${CMAKE_SOURCE_DIR}/Build/linux/assets/fonts")
+add_custom_command(
+    OUTPUT "${UHLE_FONT_ASSET_DIR}/ui.ttf" "${UHLE_FONT_ASSET_DIR}/LICENSE.txt"
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${UHLE_FONT_ASSET_DIR}"
+    COMMAND ${CMAKE_COMMAND} -E copy
+        "${CMAKE_SOURCE_DIR}/assets/fonts/ui.ttf" "${UHLE_FONT_ASSET_DIR}/ui.ttf"
+    COMMAND ${CMAKE_COMMAND} -E copy
+        "${CMAKE_SOURCE_DIR}/assets/fonts/LICENSE.txt" "${UHLE_FONT_ASSET_DIR}/LICENSE.txt"
+    DEPENDS "${CMAKE_SOURCE_DIR}/assets/fonts/ui.ttf"
+        "${CMAKE_SOURCE_DIR}/assets/fonts/LICENSE.txt"
+    COMMENT "Staging bundled UI font and license"
+    VERBATIM)
+add_custom_target(ultrahle_font_assets
+    DEPENDS "${UHLE_FONT_ASSET_DIR}/ui.ttf" "${UHLE_FONT_ASSET_DIR}/LICENSE.txt")
+add_dependencies(ultrahle ultrahle_font_assets)
+
+# Focused checks build only when requested; their binaries stay in the build tree.
+option(UHLE_FONT_TESTS "Build Linux winfont CPU, picker text and GL checks" OFF)
+if(UHLE_FONT_TESTS)
+    enable_testing()
+    add_executable(winfont_core_test tests/linux/winfont_core_test.cpp ${UHLE_FONT_CORE})
+    target_include_directories(winfont_core_test PRIVATE src/linux/font src/linux)
+    add_test(NAME winfont_core_test COMMAND winfont_core_test "${CMAKE_SOURCE_DIR}/assets/fonts/ui.ttf")
+
+    add_executable(picker_text_test tests/linux/picker_text_test.cpp)
+    target_include_directories(picker_text_test PRIVATE src/linux src/linux/font)
+    add_test(NAME picker_text_test COMMAND picker_text_test)
+
+    add_executable(winfont_gl_test tests/linux/winfont_gl_test.cpp ${UHLE_FONT_CORE} ${UHLE_FONT_GL})
+    target_include_directories(winfont_gl_test PRIVATE src/linux/font src/linux src/linux/aae)
+    target_link_libraries(winfont_gl_test PRIVATE GLEW::GLEW OpenGL::GL X11::X11)
+    add_test(NAME winfont_gl_test COMMAND winfont_gl_test "${CMAKE_SOURCE_DIR}/assets/fonts/ui.ttf")
+    set_tests_properties(winfont_gl_test PROPERTIES SKIP_RETURN_CODE 77)
+endif()

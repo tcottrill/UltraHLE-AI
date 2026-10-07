@@ -349,7 +349,9 @@ void addi64(dword *d,dword *a,dword *b)
 
 //----
 
-__inline dword op_memaddr(dword opcode)
+// File-local helper: C11 external inline does not emit a definition when
+// Debug builds leave the call out of line (unlike MSVC's inline semantics).
+static __inline dword op_memaddr(dword opcode)
 {
     dword a;
     a = OP_IMM(opcode);

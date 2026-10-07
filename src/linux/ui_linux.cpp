@@ -379,6 +379,7 @@ int main(int argc,char **argv)
     // end main_thread through its own exit command, as the Windows GUI does
     if(!s_emudone) main_command("x");
     pthread_join(emu,NULL);
+    picker_shutdown();
     xgl_linux_destroywindow();
     bootlog("exit");
     return 0;

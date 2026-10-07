@@ -54,5 +54,6 @@ EOF
 ln -sfn "$DATA_DIR/ultra.log" "$USER_DIR/ultra.log" 2>/dev/null || true
 
 export ULTRAHLE_HOME="$DATA_DIR"
+export ULTRAHLE_ASSETS="$APP_DATA/assets"
 export ULTRAHLE_ROMS="$USER_DIR/roms"   # the ROM picker's folder
 exec /app/bin/ultrahle "$@"

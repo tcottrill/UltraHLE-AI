@@ -127,6 +127,7 @@ struct LinuxWindow::Impl {
 
 	int clientW = 0;
 	int clientH = 0;
+	int windowedW = 0, windowedH = 0;   // size to return to when leaving fullscreen
 	float dpiScale = 1.0f;
 
 	// Issues the cursor attribute UNCONDITIONALLY, unlike SetCursorVisible,
@@ -505,6 +506,8 @@ bool LinuxWindow::PumpEvents()
 			// screen rect and is not free.
 			const bool sizeChanged = (newW != m_impl->clientW) || (newH != m_impl->clientH);
 
+			if (sizeChanged)
+				LOG_INFO("LinuxWindow: client size %dx%d", newW, newH);
 			m_impl->clientW = newW;
 			m_impl->clientH = newH;
 			// Keep WindowSetup in step - the renderer's viewport comes from
@@ -773,11 +776,34 @@ void LinuxWindow::ToggleBorderlessFullscreen()
 	ev.xclient.data.l[2]    = 0;
 	ev.xclient.data.l[3]    = 1;                            // source: application
 
+	// gamescope (SteamOS game mode) has no EWMH window manager: it ignores the
+	// fullscreen state and scales whatever size the window has to the output,
+	// so a 640x480 window was stretched to 1080p and every pixel was blurred.
+	// Size the window to the X screen ourselves - under gamescope that is the
+	// game resolution. Only there: on a desktop the X screen spans every
+	// monitor, and the window flashed across all of them before the WM fixed it.
+	const char* gsDisplay = getenv("GAMESCOPE_WAYLAND_DISPLAY");
+	const char* desktop   = getenv("XDG_CURRENT_DESKTOP");
+	const bool gamescope  = (gsDisplay && *gsDisplay) || (desktop && strstr(desktop, "gamescope"));
+	const int sw = DisplayWidth(m_impl->dpy, m_impl->screen);
+	const int sh = DisplayHeight(m_impl->dpy, m_impl->screen);
+	if (m_impl->fullscreen && gamescope) {
+		m_impl->windowedW = m_impl->clientW;
+		m_impl->windowedH = m_impl->clientH;
+		XMoveResizeWindow(m_impl->dpy, m_impl->win, 0, 0, sw, sh);
+	}
+
 	XSendEvent(m_impl->dpy, RootWindow(m_impl->dpy, m_impl->screen), False,
 	           SubstructureNotifyMask | SubstructureRedirectMask, &ev);
+
+	if (!m_impl->fullscreen && m_impl->windowedW > 0 && m_impl->windowedH > 0) {
+		XResizeWindow(m_impl->dpy, m_impl->win, m_impl->windowedW, m_impl->windowedH);
+		m_impl->windowedW = m_impl->windowedH = 0;
+	}
 	XFlush(m_impl->dpy);
 
-	LOG_INFO("LinuxWindow: fullscreen %s", m_impl->fullscreen ? "on" : "off");
+	LOG_INFO("LinuxWindow: fullscreen %s (X screen %dx%d%s)",
+	         m_impl->fullscreen ? "on" : "off", sw, sh, gamescope ? ", gamescope" : "");
 }
 
 void LinuxWindow::RestoreViewport()

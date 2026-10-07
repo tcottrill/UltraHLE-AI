@@ -3,8 +3,8 @@
 // one Steam shortcut should open UltraHLE and choose a game.
 //
 // Runs on the main thread with a GL context of its own (sys_gl_new_context),
-// only while emulation is stopped. Text is AAE's vector font glyph table
-// (aae/vf_fontdata.h), each stroke drawn as a thin quad.
+// only while emulation is stopped. Text uses the Linux winfont adapter;
+// AAE's vector font remains a fallback if the bundled font cannot load.
 //
 // Titles come from the ROM header, or ultra.ini's alttitle= for the game,
 // as in the Windows ROM list (listview.c).
@@ -18,6 +18,7 @@ extern "C" {
 #include "aae/sys_gl.h"
 #include "aae/vf_fontdata.h"
 #include "ui_linux.h"
+#include "picker_font.h"
 
 #include <dirent.h>
 #include <algorithm>
@@ -154,11 +155,18 @@ static const char *fs_src=
 
 static void *s_ctx;
 static GLuint s_prog,s_vao,s_vbo;
+static bool s_fontready;
 static std::vector<float> s_verts;   // x,y,r,g,b,a
 static int    s_fstart[256];
 static float  s_fwidth[256],s_foffset[256];
 
-struct Rgba { float r,g,b,a; };
+using Rgba = PickerFontColor;
+struct TextDraw {
+    float x, y, height, maxw;
+    Rgba color;
+    std::string value;
+};
+static std::vector<TextDraw> s_text;
 static const Rgba COL_WHITE ={1.00f,1.00f,1.00f,1};
 static const Rgba COL_GREY  ={0.62f,0.66f,0.72f,1};
 static const Rgba COL_DIM   ={0.40f,0.43f,0.48f,1};
@@ -171,6 +179,15 @@ static GLuint compile(GLenum type,const char *src)
     GLuint s=glCreateShader(type);
     glShaderSource(s,1,&src,NULL);
     glCompileShader(s);
+    GLint ok=GL_FALSE;
+    glGetShaderiv(s,GL_COMPILE_STATUS,&ok);
+    if(!ok) {
+        char log[1024];
+        glGetShaderInfoLog(s,sizeof(log),NULL,log);
+        bootlog("picker: shader compilation failed: %s",log);
+        glDeleteShader(s);
+        return 0;
+    }
     return s;
 }
 
@@ -201,10 +218,28 @@ static bool glinit(void)
     if(s_ctx) return sys_gl_bind(s_ctx);
     s_ctx=sys_gl_new_context();
     if(!s_ctx) return false;
+    GLuint vs=compile(GL_VERTEX_SHADER,vs_src),fs=compile(GL_FRAGMENT_SHADER,fs_src);
+    if(!vs || !fs) {
+        if(vs) glDeleteShader(vs);
+        if(fs) glDeleteShader(fs);
+        picker_shutdown();
+        return false;
+    }
     s_prog=glCreateProgram();
-    glAttachShader(s_prog,compile(GL_VERTEX_SHADER,vs_src));
-    glAttachShader(s_prog,compile(GL_FRAGMENT_SHADER,fs_src));
+    glAttachShader(s_prog,vs);
+    glAttachShader(s_prog,fs);
     glLinkProgram(s_prog);
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+    GLint linked=GL_FALSE;
+    glGetProgramiv(s_prog,GL_LINK_STATUS,&linked);
+    if(!linked) {
+        char log[1024];
+        glGetProgramInfoLog(s_prog,sizeof(log),NULL,log);
+        bootlog("picker: shader link failed: %s",log);
+        picker_shutdown();
+        return false;
+    }
     glGenVertexArrays(1,&s_vao);
     glGenBuffers(1,&s_vbo);
     glBindVertexArray(s_vao);
@@ -213,8 +248,28 @@ static bool glinit(void)
     glVertexAttribPointer(0,2,GL_FLOAT,GL_FALSE,6*sizeof(float),(void*)0);
     glEnableVertexAttribArray(1);
     glVertexAttribPointer(1,4,GL_FLOAT,GL_FALSE,6*sizeof(float),(void*)(2*sizeof(float)));
-    fontinit();
+    s_fontready=picker_font_init();
+    if(!s_fontready) fontinit();
     return true;
+}
+
+void picker_shutdown()
+{
+    if(!s_ctx) return;
+    // The emulator has joined before this is called at process shutdown.
+    // Font/shape objects belong to this separate main-thread GL context.
+    if(sys_gl_bind(s_ctx)) {
+        picker_font_shutdown();
+        if(s_vbo) glDeleteBuffers(1,&s_vbo);
+        if(s_vao) glDeleteVertexArrays(1,&s_vao);
+        if(s_prog) glDeleteProgram(s_prog);
+    }
+    sys_gl_destroy_context(s_ctx);
+    s_ctx=nullptr;
+    s_prog=s_vao=s_vbo=0;
+    s_fontready=false;
+    s_text.clear();
+    s_verts.clear();
 }
 
 static void vert(float x,float y,const Rgba &c)
@@ -257,6 +312,7 @@ static std::string upper(const char *s)
 
 static float textwidth(const char *s0,float scale)
 {
+    if(s_fontready) return picker_font_width(s0,scale*10.0f);
     std::string u=upper(s0);
     const char *s=u.c_str();
     float w=0;
@@ -271,6 +327,11 @@ static float textwidth(const char *s0,float scale)
 // text at x, baseline y; cut with "..." past maxw (0 = no limit)
 static void text(float x,float y,float scale,const Rgba &c,const char *s,float maxw=0)
 {
+    if(s_fontready) {
+        // Defer text until all background/selection rectangles are drawn.
+        s_text.push_back({x,y,scale*10.0f,maxw,c,s?s:""});
+        return;
+    }
     std::string t=upper(s);
     if(maxw>0 && textwidth(t.c_str(),scale)>maxw)
     {
@@ -366,8 +427,11 @@ int picker_frame(int input,int canresume,char *path,int pathsize)
     glClearColor(0,0,0,1);
     glClear(GL_COLOR_BUFFER_BIT);
     glViewport(vx,vy,vw,vh);
+    // before layout: text is measured and baked in this viewport's pixels
+    if(s_fontready) picker_font_begin(vx,vy,vw,vh);
 
     s_verts.clear();
+    s_text.clear();
     rect(0,0,1024,768,{0.04f,0.05f,0.08f,1});
     textcentered(700,6.0f,COL_YELLOW,"ULTRAHLE");
     textcentered(668,1.6f,COL_DIM,s_dir.c_str());
@@ -406,6 +470,11 @@ int picker_frame(int input,int canresume,char *path,int pathsize)
     glBindBuffer(GL_ARRAY_BUFFER,s_vbo);
     glBufferData(GL_ARRAY_BUFFER,s_verts.size()*sizeof(float),s_verts.data(),GL_STREAM_DRAW);
     glDrawArrays(GL_TRIANGLES,0,(GLsizei)(s_verts.size()/6));
+    if(s_fontready) {
+        for(const auto& t:s_text)
+            picker_font_draw(t.x,t.y,t.height,t.color,t.value.c_str(),t.maxw);
+        picker_font_end();
+    }
     if(picker_capture) capture(ww,wh);
     glchain_swap_buffers();
     return PICK_NONE;

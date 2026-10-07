@@ -256,6 +256,7 @@ int x_texture2(int text1handle,int text2handle)
 // nothing; drawn at 2x, GL's filter mixed every edge texel with the
 // transparent one beside it. Mario Kart 64's player select portraits
 // (64x16 strips, alpha blended) had a halo of half-transparent pixels.
+// Also set for any draw the RDP point samples (G_TF_POINT, copy mode).
 int x_rectclamp(int s,int t,int point)
 {
     int c=(s?1:0)|(t?2:0)|(point?4:0);

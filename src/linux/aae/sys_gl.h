@@ -19,6 +19,7 @@ void DeleteGLContext();
 bool sys_gl_context_current();   // UltraHLE: the context is current on this thread
 void* sys_gl_new_context();      // UltraHLE: a second context (ROM picker), current here
 bool sys_gl_bind(void* ctx);     // UltraHLE: make that one current on this thread
+void sys_gl_destroy_context(void* ctx); // destroy only a separate picker context
 
 void glchain_set_vsync(bool enabled);
 void glchain_swap_buffers();

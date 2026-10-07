@@ -961,6 +961,16 @@ static void cmd_combiner(std::vector<std::string>& args)
     print("combiner: %s\n", rdp_n64combiner ? "N64 (shader)" : "old pattern compiler");
 }
 
+// texfilter 0|1: everything filtered (old) or point sampled where the RDP is
+static void cmd_texfilter(std::vector<std::string>& args)
+{
+    char *p = param(1, args);
+    if (*p) rdp_texfilter = atoi(p) != 0;
+    else rdp_texfilter ^= 1;
+    rdp_forcemodechange();
+    print("texfilter: %s\n", rdp_texfilter ? "as the RDP (point/filtered)" : "old (all filtered)");
+}
+
 // softrdp 0|1: raw RDP lists (libdragon) drawn by OpenGL or in software
 static void cmd_softrdp(std::vector<std::string>& args)
 {
@@ -1478,6 +1488,7 @@ void cmd_init()
     cmds["keys"] = cmd_keys;
     cmds["autopad"] = cmd_autopad;
     cmds["combiner"] = cmd_combiner;
+    cmds["texfilter"] = cmd_texfilter;
     cmds["softrdp"] = cmd_softrdp;
     cmds["hide3dfx"] = cmd_hide3dfx;
     cmds["show3dfx"] = cmd_show3dfx;

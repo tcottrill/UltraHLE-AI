@@ -112,6 +112,7 @@ extern int showinfo;
 extern int showtest;
 extern int showtest2;
 extern int rdp_n64combiner; // 1: the N64 combiner in the shader, 0: the old pattern compiler
+extern int rdp_texfilter;   // 1: point/filtered sampling as the RDP's mode says, 0 (default): everything filtered
 void rdp_forcemodechange(void); // the next draw sets up its whole mode again
 
 void rdp_togglefullscreen(void);

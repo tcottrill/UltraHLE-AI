@@ -23,6 +23,7 @@ enum { PICK_NONE, PICK_LAUNCH, PICK_QUIT, PICK_RESUME };
 // main thread, emulation stopped
 void picker_scan(const char *dir);
 void picker_message(const char *msg);   // a line under the list ("" clears)
+void picker_shutdown();                // main thread, before window destruction
 int  picker_frame(int input,int canresume,char *path,int pathsize); // draws a frame
 extern volatile int picker_capture;     // 1: save the next frame to picker.ppm
 

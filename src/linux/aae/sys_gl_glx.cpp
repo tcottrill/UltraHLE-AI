@@ -232,6 +232,15 @@ bool sys_gl_bind(void* ctx)
 	return gDpy && gWin && glXMakeCurrent(gDpy, gWin, (GLXContext)ctx);
 }
 
+void sys_gl_destroy_context(void* context)
+{
+	GLXContext ctx = static_cast<GLXContext>(context);
+	if (!gDpy || !ctx || ctx == gCtx) return;
+	if (glXGetCurrentContext() == ctx)
+		glXMakeCurrent(gDpy, 0, nullptr);
+	glXDestroyContext(gDpy, ctx);
+}
+
 void glchain_set_vsync(bool enabled)
 {
 	if (!gDpy || !gWin) return;

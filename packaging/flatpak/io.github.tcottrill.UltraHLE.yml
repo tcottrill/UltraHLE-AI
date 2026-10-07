@@ -67,6 +67,9 @@ modules:
         dest: src
       - type: file
         path: ../../CMakeLists.txt
+      - type: dir
+        path: ../../assets/fonts
+        dest: assets/fonts
       - type: file
         path: ../../Build/ULTRA.INI
         dest-filename: ultra.ini
@@ -84,6 +87,8 @@ modules:
       - install -Dm755 packaging/ultrahle-launcher.sh /app/bin/ultrahle-launcher.sh
       # binary copy: ultra.ini's Japanese section names are Shift-JIS bytes
       - install -Dm644 ultra.ini /app/share/ultrahle/ultra.ini
+      - install -Dm644 assets/fonts/ui.ttf /app/share/ultrahle/assets/fonts/ui.ttf
+      - install -Dm644 assets/fonts/LICENSE.txt /app/share/ultrahle/assets/fonts/LICENSE.txt
       - install -Dm644 packaging/io.github.tcottrill.UltraHLE.desktop
           /app/share/applications/io.github.tcottrill.UltraHLE.desktop
       - install -Dm644 packaging/io.github.tcottrill.UltraHLE.metainfo.xml

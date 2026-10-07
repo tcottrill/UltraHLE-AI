@@ -449,6 +449,7 @@ static void drawprims_dump(int i0,int i1);
 // the N64 combiner (n64_combine): draw state (texenable) and decoded inputs
 static Combine comn64;
 int     rdp_n64combiner=1;
+int     rdp_texfilter=0; // the user prefers everything filtered (Harvest Moon's shadows)
 static int n64cc[2][4],n64ac[2][4],n64cycles;
 
 /****************************************************************************
@@ -1196,15 +1197,22 @@ int txt_checkalpha(byte *dst,int dx,int dy)
     return(0);
 }
 
-// A texture rectangle drawn 1:1 from whole texels of an unshifted tile: the
-// RDP samples each texel's centre, its filter blends nothing, and the
-// texels reach the screen as they are. Drawn larger here, it is point
-// sampled and its texture is not bled (txt_keybleed).
+// A texture rectangle drawn 1:1 from whole texels of an unshifted tile, the
+// whole tile and nothing else: one piece of a larger picture. The RDP
+// samples each texel's centre and its filter blends nothing; drawn larger
+// here, it is point sampled and its texture is not bled (txt_keybleed).
+// Filtered, every piece ends at its own edge and the picture shows seams
+// (Mario Kart 64's player select portraits, four 32x32 pieces). A rectangle
+// that cuts a part out of its tile, a glyph from a font atlas, is filtered
+// like any other: point sampled at 2x, Beetle Adventure Racing's 4-bit
+// alpha font showed its edge texels as dark stripes inside the letters,
+// where Project64 draws it smooth.
 static int rect_texelexact(TexRect *tr,Tile *t)
 {
     return(rst.s_cycles<=2 && !t->shifts && !t->shiftt &&
-           fabsf(tr->s1)==1024.0f && fabsf(tr->t1)==1024.0f &&
-           fmodf(tr->s0,32.0f)==0.0f && fmodf(tr->t0,32.0f)==0.0f);
+           tr->s1==1024.0f && tr->t1==1024.0f &&
+           tr->s0==8.0f*t->x0full && tr->t0==8.0f*t->y0full &&
+           ceilf(tr->x0)-tr->x1==(float)t->xs && ceilf(tr->y0)-tr->y1==(float)t->ys);
 }
 
 // A transparent texel (alpha 0) next to visible ones takes their average
@@ -2183,6 +2191,66 @@ void txt_repeatmask(byte *dst,int dx,int dy,byte *src,int mx,int my,int mirx,int
     }
 }
 
+// Which texels of a texture made for a texture rectangle are visible (alpha
+// above 0), one byte each, by texture slot: txt_rectopen reads it.
+static byte *txt_vismap[MAXTXT];
+static int   txt_visw[MAXTXT],txt_vish[MAXTXT];
+
+static void txt_setvismap(int i,byte *rgba,int xs,int ys)
+{
+    int n=xs*ys,k;
+    free(txt_vismap[i]);
+    txt_vismap[i]=NULL;
+    if(rst.rectmode!=1 || n<=0 || n>65536) return;
+    txt_vismap[i]=(byte *)malloc(n);
+    if(!txt_vismap[i]) return;
+    for(k=0;k<n;k++) txt_vismap[i][k]=rgba[k*4+3]!=0;
+    txt_visw[i]=xs;
+    txt_vish[i]=ys;
+}
+
+// A filtered texture rectangle samples only s,t in cl (txt_rectrange: s low,
+// t low, s high, t high, 1/32 texels). Clamped there, its edge texels drawn
+// above 1x stop at full strength; the RDP's own filter, and Project64's,
+// would fade them into the texel beyond. Where that texel row or column is
+// transparent across the rectangle there is nothing to bleed in: let the
+// sampling go half a texel further. Beetle Adventure Racing's menu font
+// (rows below each glyph empty) had a hard bottom edge, as if cut off.
+// Where it is visible, the clamp stays (International Superstar Soccer
+// 2000's atlas pieces and letters took in a line of the next cell).
+static void txt_rectopen(Tile *t,float *cl)
+{
+    int    i=t->texture,w,h,ax,a,b,c,k;
+    byte  *m;
+    float  org;
+    if(i<=0 || i>=MAXTXT || !(m=txt_vismap[i])) return;
+    w=txt_visw[i];
+    h=txt_vish[i];
+    for(ax=0;ax<2;ax++)
+    {
+        int n=ax?h:w,o=ax?w:h;  // texels along this axis, across it
+        float olo=cl[1-ax],ohi=cl[3-ax],oorg=8.0f*(ax?t->x0full:t->y0full);
+        org=8.0f*(ax?t->y0full:t->x0full);
+        // the texels across the rectangle that its samples reach
+        a=(int)floorf((olo-oorg)/32.0f);
+        b=(int)floorf((ohi-oorg)/32.0f)+1;
+        if(a<0) a=0;
+        if(b>o-1) b=o-1;
+        for(k=0;k<2;k++)
+        {
+            // the texel half a texel past this edge brings in
+            c=k?(int)floorf((cl[2+ax]-org)/32.0f+0.5f)+1
+               :(int)floorf((cl[ax]-org)/32.0f-0.5f);
+            if(c<0 || c>=n || a>b) continue;
+            {
+                int j,vis=0;
+                for(j=a;j<=b && !vis;j++) vis=ax?m[j+c*w]:m[c+j*w];
+                if(!vis) cl[k?2+ax:ax]+=k?16.0f:-16.0f;
+            }
+        }
+    }
+}
+
 void txt_loaddata(Texture *txt,Tile *t)
 {
     int sx,sy,mx,my;
@@ -2251,11 +2319,16 @@ void txt_loaddata(Texture *txt,Tile *t)
         // Not for one drawn 1:1 (point sampled, rect_texelexact): its
         // transparent texels can show as they are, and Mario Kart 64's player
         // select portraits had a green or brown halo of the bled colours.
-        if(rst.rectmode==1 && !rect_texelexact(&rst.texrect,t)) txt_keybleed(s,t->xs,t->ys);
+        // Nor for an I texture: its alpha is its intensity, a transparent
+        // texel is black and shows as black where the draw ignores alpha.
+        // Donkey Kong 64's Dolby logo (I4, 1:1) took the grey of the RDRAM
+        // row past the picture into its last, empty row: a dotted line.
+        if(rst.rectmode==1 && t->fmt!=4 && !rect_texelexact(&rst.texrect,t)) txt_keybleed(s,t->xs,t->ys);
     }
 
     // check for alpha
     hasalpha=txt_checkalpha(s,t->xs,t->ys);
+    txt_setvismap((int)(txt-rst.txt),s,t->xs,t->ys);
 
     // scale to power of 2
     if(sx!=t->xs || sy!=t->ys)
@@ -2313,7 +2386,8 @@ void txt_loaddata(Texture *txt,Tile *t)
 //    if(t->membase==0x8028b2b0) fill(s,sx,sy,0xff0000ff);
 //    if((t->membase&0xffff0000)==0x00340000) txt_fill(s,sx,sy,0xff0000ff);
 
-//    if(rst.s_txtfilt==0) flags|=X_NOBILIN;
+    // G_TF_POINT and copy mode are point sampled per draw (txt_pointsampled,
+    // x_rectclamp's sampler), not here: a cached texture outlives the mode.
 
     // vifb=1 draws in the game's own pixels, so its textures are sampled as
     // the RDP does: a point for copy mode and point sampling. Filtered,
@@ -2347,6 +2421,16 @@ static int tri_texhalf(void)
     return(rst.rectmode==0 && !FIELD(rst.other0[0],19,1));
 }
 
+// The RDP point samples in copy mode and with G_TF_POINT: a pixel takes
+// texel floor(s). Filtered, texel i sits at s=i and s=i+f blends i and i+1
+// by f (programming manual 13.7.5.3; GLideN64's accurate path and
+// parallel-rdp do the same). Off by default (`texfilter 1` turns it on):
+// everything filtered, at the filtered offset, looks better upscaled.
+static int txt_pointsampled(void)
+{
+    return(rdp_texfilter && (rst.s_cycles==3 || !(rst.s_txtfilt&2)));
+}
+
 void txt_setscales(int tile)
 {
     Tile    *t=TEXTILE(tile);
@@ -2374,15 +2458,25 @@ void txt_setscales(int tile)
     else if(t->shiftt>10)           ydm=    (1 << (16-t->shiftt));
     else                            ydm=1.0;
 
-    if(1)
+    // GL samples texel i's centre at i+0.5. Filtered, the RDP's s=i is that
+    // centre: half a texel of the shifted tile, 16/xdm before the shift (16
+    // unscaled put a shift-left-1 tile a whole texel over). Point sampled,
+    // floor(s) is GL_NEAREST at s itself; half the RDP's 1/32 step keeps a
+    // whole s (a 1:1 rectangle's every pixel) off the texel's edge.
+    if(!rdp_texfilter)
     {
         rst.txt_uadd=16.0-8.0*t->x0full/xdm;
         rst.txt_vadd=16.0-8.0*t->y0full/ydm;
     }
+    else if(txt_pointsampled())
+    {
+        rst.txt_uadd=0.5-8.0*t->x0full/xdm;
+        rst.txt_vadd=0.5-8.0*t->y0full/ydm;
+    }
     else
     {
-        rst.txt_uadd=16.0-8.0*t->x0full;
-        rst.txt_vadd=16.0-8.0*t->y0full;
+        rst.txt_uadd=(16.0-8.0*t->x0full)/xdm;
+        rst.txt_vadd=(16.0-8.0*t->y0full)/ydm;
     }
 
     xd*=xdm;
@@ -2740,7 +2834,8 @@ void drawprims(int p,int i0,int i1)
     }
 
     // draw
-    x_rectclamp(rst.rectmode==1 && (rst.rectclamp&1),rst.rectmode==1 && (rst.rectclamp&2),rst.rectmode==1 && (rst.rectclamp&4));
+    x_rectclamp(rst.rectmode==1 && (rst.rectclamp&1),rst.rectmode==1 && (rst.rectclamp&2),
+                (rst.rectmode==1 && (rst.rectclamp&4)) || txt_pointsampled());
     if(COM.dualtxt)
     {
         if(st.dumpgfx) logd("DUALTXT! ");
@@ -2843,7 +2938,8 @@ static void drawprims_n64(int i0,int i1)
     if(st.dumpgfx) logd("\n+FLUSH n64comb cycles:%i tex:%i blend:%04X/%04X rect:%i",
         n64cycles,COM.texenable,rst.s_blend1,rst.s_blend2,rect);
 
-    x_rectclamp(rect && (rst.rectclamp&1),rect && (rst.rectclamp&2),rect && (rst.rectclamp&4));
+    x_rectclamp(rect && (rst.rectclamp&1),rect && (rst.rectclamp&2),
+                (rect && (rst.rectclamp&4)) || txt_pointsampled());
     x_begin(X_TRIANGLES);
     for(i=i0;i<i1;i++)
     {
@@ -3523,13 +3619,19 @@ void rdp_texrect(TexRect *tr)
         // draws a pixel that starts before the edge. Mace's backdrop halves
         // end at x 159.75 and start at 160; drawn to 159.75 at 2x, half a
         // pixel stayed empty, a dark line down the middle of the screen.
+        // Point sampled, pixel i shows floor(s0+i*dsdx) across its whole
+        // width, so the edges carry s0 and s0+w*ds and every subpixel drawn
+        // above 1x floors to its own pixel's texel; centred, the left half
+        // of each took the texel before (Bust-A-Move 2's Taito logo half an
+        // N64 pixel right and down at 2x). GLideN64 drops the half too.
         float ds=tr->s1/32.0f,dt=tr->t1/32.0f;
+        float half=txt_pointsampled()?0.0f:0.5f;
         tr->x0=ceilf(tr->x0);
         tr->y0=ceilf(tr->y0);
-        u0=tr->s0-0.5f*ds;
-        v0=tr->t0-0.5f*dt;
-        u1=tr->s0+(tr->x0-tr->x1-0.5f)*ds;
-        v1=tr->t0+(tr->y0-tr->y1-0.5f)*dt;
+        u0=tr->s0-half*ds;
+        v0=tr->t0-half*dt;
+        u1=tr->s0+(tr->x0-tr->x1-half)*ds;
+        v1=tr->t0+(tr->y0-tr->y1-half)*dt;
         // The RDP samples once a pixel, from s0 to s0+(w-1)*ds. Drawn larger,
         // the pixels in between must stay inside that too: filtered, the
         // last column and row took in the texel after them. International
@@ -3543,6 +3645,7 @@ void rdp_texrect(TexRect *tr)
                 int point=!(rst.s_txtfilt&2);
                 txt_rectrange(tr->s0,ds,tr->x0-tr->x1,8.0f*t->x0full,point,cl+0,cl+2);
                 txt_rectrange(tr->t0,dt,tr->y0-tr->y1,8.0f*t->y0full,point,cl+1,cl+3);
+                if(!point && !rect_texelexact(tr,t)) txt_rectopen(t,cl);
                 clamp=1;
             }
         }
