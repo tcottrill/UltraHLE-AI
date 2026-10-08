@@ -1323,20 +1323,31 @@ void vi_screensize(dword viwidth,dword hvideo,dword vvideo,dword xscale,dword vi
     int vstart=(vvideo>>16)&0x3ff;
     int vend=vvideo&0x3ff;
     int yscale=viyscale&0xfff;
-    int h,fields=0;
+    int h,fields=0,crop=-1;
 
     // VI_WIDTH twice the width the VI shows (H_VIDEO times X_SCALE): each
     // field is every other line of the buffer. Rogue Squadron's missions
     // show a 512x448 buffer as 1024 wide, origin +0 or +1 line; taken as a
     // 1024 wide screen, its 512 wide buffer looked offscreen (render to
     // texture) and the screen stayed black.
+    // Less than VI_WIDTH shown: the rest of each line is off the TV's edge.
+    // Mario Tennis draws a 304 wide picture in a 384 wide buffer and shows
+    // (0x2D5-0x80)*0x20E/1024 = 306 of it; mapped 384 wide, the intro sat
+    // left of the middle. The screen keeps VI_WIDTH (the buffer is still the
+    // screen's, not offscreen); only the window mapping crops (rdp_screenw).
     {
         int hs=(hvideo>>16)&0x3ff,he=hvideo&0x3ff,xs=xscale&0xfff,shown;
         if(he>hs && xs)
         {
             shown=(he-hs)*xs/1024;
             if(shown>=160 && w>=shown*2-8 && w<=shown*2+8) { w/=2; fields=1; }
+            crop=(!fields && shown>=160 && shown<w-2)?shown:0;
         }
+    }
+    if(crop>=0 && crop!=init.viewcropwid && w>=160 && w<=1024)
+    {
+        init.viewcropwid=crop;
+        if(crop) print("lle: the VI shows %i of %i pixels per line\n",crop,w);
     }
 
     if(w<160 || w>1024) return;
@@ -1571,6 +1582,7 @@ void lle_decide(int important,int importanttotal,int hasrescan)
     // screen height comes from the VI (lle_visize), or until it has one
     // from the first full-screen fillrect: not the ultra.ini default
     init.viewporthig=0;
+    init.viewcropwid=0; // the last game's VI crop
 
     // nothing in KUSEG or KSEG2/3 is mapped until the game writes the TLB
     tlb_defaultall();

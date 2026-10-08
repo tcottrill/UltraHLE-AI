@@ -10,6 +10,7 @@ extern "C" {
 #define PAK_MEMORY 0 // Controller Pak (saves in saves\<title>.mpk)
 #define PAK_RUMBLE 1 // Rumble Pak
 #define PAK_NONE   2
+#define PAK_CONTROLLER 3 // Controller Pak only: no Rumble Pak answer at 0x8000
 
 typedef struct
 {

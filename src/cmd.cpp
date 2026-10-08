@@ -971,6 +971,15 @@ static void cmd_texfilter(std::vector<std::string>& args)
     print("texfilter: %s\n", rdp_texfilter ? "as the RDP (point/filtered)" : "old (all filtered)");
 }
 
+// trigrow 0|1: opaque triangles grow to close sub-pixel gaps (RDP coverage) or as given
+static void cmd_trigrow(std::vector<std::string>& args)
+{
+    char *p = param(1, args);
+    if (*p) rdp_growtris = atoi(p) != 0;
+    else rdp_growtris ^= 1;
+    print("trigrow: %s\n", rdp_growtris ? "on (gaps closed)" : "off");
+}
+
 // softrdp 0|1: raw RDP lists (libdragon) drawn by OpenGL or in software
 static void cmd_softrdp(std::vector<std::string>& args)
 {
@@ -1489,6 +1498,7 @@ void cmd_init()
     cmds["autopad"] = cmd_autopad;
     cmds["combiner"] = cmd_combiner;
     cmds["texfilter"] = cmd_texfilter;
+    cmds["trigrow"] = cmd_trigrow;
     cmds["softrdp"] = cmd_softrdp;
     cmds["hide3dfx"] = cmd_hide3dfx;
     cmds["show3dfx"] = cmd_show3dfx;

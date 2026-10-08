@@ -349,7 +349,8 @@ void inifile_command(char *cmd)
         if(!_stricmp(param,"rumble")) cart.pak=PAK_RUMBLE;
         else if(!_stricmp(param,"none")) cart.pak=PAK_NONE;
         else if(!_stricmp(param,"memory")) cart.pak=PAK_MEMORY;
-        else print("ultra.ini: pak=%s? (memory, rumble or none)\n",param);
+        else if(!_stricmp(param,"controller")) cart.pak=PAK_CONTROLLER;
+        else print("ultra.ini: pak=%s? (memory, controller, rumble or none)\n",param);
     }
     else IFIS(cmd,"savepath")
     {

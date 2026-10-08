@@ -887,7 +887,9 @@ void disasm_dumpcode(char *filename,dword addr,int size,dword dataaddr,int datas
     fprintf(f1,"CPU code at %08X (size %i):\n",addr,size);
     for(i=0;i<size;i+=4)
     {
-        x=mem_read32(addr+i);
+        dword a=addr+i;
+        // KUSEG/KSEG2 code goes through the TLB mapping (Turok engine)
+        x=(a<0x80000000 || a>=0xC0000000)?mem_vread32(a):mem_read32(a);
         p=disasm(addr+i,x);
         fprintf(f1,"%04X: <%08X>  %s\n",addr+i,x,p);
     }

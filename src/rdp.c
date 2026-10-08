@@ -450,7 +450,19 @@ static void drawprims_dump(int i0,int i1);
 static Combine comn64;
 int     rdp_n64combiner=1;
 int     rdp_texfilter=0; // the user prefers everything filtered (Harvest Moon's shadows)
+int     rdp_growtris=1;  // opaque triangles grow to close sub-pixel gaps (x_growtris)
 static int n64cc[2][4],n64ac[2][4],n64cycles;
+
+// The RDP fills every pixel a triangle touches, GL only those whose centre
+// it covers: opaque triangles grow by 0.4 target pixels (x_growtris) so the
+// sub-pixel gaps games leave between pieces stay closed (Mario Party 3's
+// minigame board). Not rectangles, which are already on whole pixels, and
+// not blended draws, which would blend twice where neighbours now overlap.
+static void growtris(int blend1,int blend2)
+{
+    x_growtris(rdp_growtris && rst.rectmode!=1 &&
+               blend1==X_ONE && blend2==X_ZERO ? 0.4f : 0.0f);
+}
 
 /****************************************************************************
 /* snapshot (F10/F12, 'screen [file]')
@@ -630,8 +642,17 @@ static void rdp_setbuffer(int i,dword c0,dword c1)
         if(bytes<1) bytes=1;
         if(addr!=rst.lastcbufs[rst.lastcbufi])
         {
+            // A buffer selected again keeps the height already seen drawn
+            // into it. Rat Attack draws 640x320 into 0x1E9800, selects its z
+            // image as color image to clear it, then 0x1E9800 again: taken as
+            // 480 lines, it covered a wall texture just past its end
+            // (0x24D9D8), drawn from a placeholder every other frame.
+            int j,hig=0;
+            for(j=0;j<8;j++)
+                if(rst.lastcbufs[j]==addr && rst.lastcbufwid[j]==rst.bufwid[i] &&
+                   rst.lastcbufhig[j]>hig) hig=rst.lastcbufhig[j];
             rst.lastcbufi=(rst.lastcbufi+1)&7;
-            rst.lastcbufhig[rst.lastcbufi]=0;
+            rst.lastcbufhig[rst.lastcbufi]=hig;
         }
         rst.lastcbufs    [rst.lastcbufi]=addr;
         rst.lastcbufwid  [rst.lastcbufi]=rst.bufwid[i];
@@ -643,6 +664,8 @@ static void rdp_setbuffer(int i,dword c0,dword c1)
 
 // How many frames ago the color image at addr was first set, for as long as
 // it has been set at least every 4th frame since (0: this frame, or unknown)
+static int rdp_screenw(void);
+
 static int cbuf_age(dword addr)
 {
     int j;
@@ -2814,6 +2837,16 @@ void mixcolor(float *d,float *shade,int col,int alp)
     }
 }
 
+// Depth sent with a vertex: with z source = primitive (othermode bit 2) every
+// pixel takes the SETPRIMDEPTH value, also for microcode triangles (RT64
+// RasterVS, the RDP itself). Extreme-G 2 clears its z-buffer with a
+// full-screen quad at prim depth 0x7FFF; drawn at its own near depth it hid
+// the track and the bikes.
+static float vxdepth(const Vertex *vx)
+{
+    return(rst.s_zsrc?rst.primz:vx->zs);
+}
+
 void drawprims(int p,int i0,int i1)
 {
     Primitive *pr;
@@ -2836,6 +2869,8 @@ void drawprims(int p,int i0,int i1)
     // draw
     x_rectclamp(rst.rectmode==1 && (rst.rectclamp&1),rst.rectmode==1 && (rst.rectclamp&2),
                 (rst.rectmode==1 && (rst.rectclamp&4)) || txt_pointsampled());
+    // a second pass draws over the first: both keep the same edges
+    growtris(COM.passes==1?COM.blend1[p]:0,COM.blend2[p]);
     if(COM.dualtxt)
     {
         if(st.dumpgfx) logd("DUALTXT! ");
@@ -2875,7 +2910,7 @@ void drawprims(int p,int i0,int i1)
                          (vx->tex[1]+rst.txt_vadd )*rst.txt_vscale);
                 x_vxtex2((vx->tex[0]+rst.txt_uadd2)*rst.txt_uscale,
                          (vx->tex[1]+rst.txt_vadd2)*rst.txt_vscale);
-                x_vxdepth(vx->zs);
+                x_vxdepth(vxdepth(vx));
                 x_vxposv((xt_pos *)vx->pos);
             }
         }
@@ -2915,12 +2950,13 @@ void drawprims(int p,int i0,int i1)
                                  (pr->tclamp[1]+rst.txt_vadd)*rst.txt_vscale,
                                  (pr->tclamp[2]+rst.txt_uadd)*rst.txt_uscale,
                                  (pr->tclamp[3]+rst.txt_vadd)*rst.txt_vscale);
-                x_vxdepth(vx->zs);
+                x_vxdepth(vxdepth(vx));
                 x_vxposv  ((xt_pos *)vx->pos);
             }
         }
         x_end();
     }
+    x_growtris(0); // other x_vx users (pictures, wireframe) stay as they are
 
     drawprims_dump(i0,i1);
 }
@@ -2940,6 +2976,7 @@ static void drawprims_n64(int i0,int i1)
 
     x_rectclamp(rect && (rst.rectclamp&1),rect && (rst.rectclamp&2),
                 (rect && (rst.rectclamp&4)) || txt_pointsampled());
+    growtris(rst.s_blend1,rst.s_blend2);
     x_begin(X_TRIANGLES);
     for(i=i0;i<i1;i++)
     {
@@ -2966,11 +3003,12 @@ static void drawprims_n64(int i0,int i1)
                              (pr->tclamp[3]+rst.txt_vadd)*rst.txt_vscale);
             x_vxtex2((vx->tex[0]+rst.txt_uadd2)*rst.txt_uscale2,
                      (vx->tex[1]+rst.txt_vadd2)*rst.txt_vscale2);
-            x_vxdepth(vx->zs);
+            x_vxdepth(vxdepth(vx));
             x_vxposv((xt_pos *)vx->pos);
         }
     }
     x_end();
+    x_growtris(0);
 
     drawprims_dump(i0,i1);
 }
@@ -3092,7 +3130,7 @@ void flushprims(void)
         x_blend(rst.s_blend1,rst.s_blend2);
         x_n64combine(n64cycles,&n64cc[0][0],&n64ac[0][0],
                      rst.colf[C_PRIM],rst.colf[C_ENV],rst.colf[C_PLODF][0]);
-        x_n64pixel((float)init.gfxwid/(init.viewportwid?init.viewportwid:320));
+        x_n64pixel((float)init.gfxwid/(init.viewportwid?rdp_screenw():320));
         x_n64convert(rst.k4,rst.k5);
         x_n64key(rst.keycenter,rst.keyscale);
         x_mask(X_ENABLE,rst.s_zupd?X_ENABLE:X_DISABLE,
@@ -3584,13 +3622,19 @@ void rdp_texrect(TexRect *tr)
         // check on t and came out 8 rows down, a green bar above and below
         // the text. A flipped rectangle keeps the larger one.
         float w=tr->x0-tr->x1,h=tr->y0-tr->y1;
+        // Copy mode steps s by 4.0 per pixel for one texel each (4 pixels a
+        // clock, u1 below takes a quarter of it too). Measured with 4.0, All
+        // Star Tennis '99's last 48 wide strip of the Ubi Soft logo (mask 6,
+        // s=0 at tile column 320) looked 188 texels long and stayed unwrapped:
+        // it started at texel 16, a slice of the logo out of place.
+        float ds=rst.s_cycles>2?tr->s1*0.25f:tr->s1;
         if(tr->flip) w=h=(w>h?w:h);
         // The wrap is of the coordinate minus the tile's top left, as the RDP
         // takes it. Wrapped as an absolute value, SF Rush's HUD counter
         // digits (tile rows 153-169, mask 32, drawn from t=169) moved up 7
         // rows and showed two half digits.
         if(t->cms<2 && t->masks>0 && (1<<t->masks)>t->xs)
-            tr->s0=txt_rectperiod(tr->s0,tr->s1,w,8.0f*t->x0full,t->masks,t->cms==1);
+            tr->s0=txt_rectperiod(tr->s0,ds,w,8.0f*t->x0full,t->masks,t->cms==1);
         if(t->cmt<2 && t->maskt>0 && (1<<t->maskt)>t->ys)
             tr->t0=txt_rectperiod(tr->t0,tr->t1,h,8.0f*t->y0full,t->maskt,t->cmt==1);
     }
@@ -3779,6 +3823,16 @@ void rdp_gameviewport(float xm,float ym,float xa,float ya)
     rdp_viewport(xm,ym,xa,ya);
 }
 
+// The screen width the window shows: VI_WIDTH, or the part of each line the
+// VI shows when that is less (lle.c vi_screensize). Not while drawing into an
+// offscreen target, which maps its own width 1:1.
+static int rdp_screenw(void)
+{
+    if(!rst.rtt_on && init.viewcropwid>0 && init.viewcropwid<init.viewportwid)
+        return(init.viewcropwid);
+    return(init.viewportwid);
+}
+
 void rdp_viewport(float xm,float ym,float xa,float ya)
 {
     int xs=320;
@@ -3786,7 +3840,7 @@ void rdp_viewport(float xm,float ym,float xa,float ya)
 
     if(init.viewportwid)
     {
-        xs=init.viewportwid;
+        xs=rdp_screenw();
         if(init.viewporthig) ys=init.viewporthig; // 0: not known yet (lle.c)
     }
 
@@ -4094,8 +4148,20 @@ static void n64_combine(dword x0,dword x1)
         }
     }
     else
-    {   // equal cycles are one stage, as in GLideN64 (Combiner_GetStages)
-        n64cycles=memcmp(raw[0],raw[1],sizeof(raw[0]))?2:1;
+    {   // equal cycles are one stage, as in GLideN64 (Combiner_GetStages),
+        // unless they read a texel or the combined value: in the second
+        // cycle those are TEXEL1, the next pixel's TEXEL0 and the first
+        // cycle's result. Supercross 2000 draws with tile 7 (its 16-bit load
+        // tile) and (TEXEL0-ENV)*SHADE in both cycles, so what shows is tile
+        // 0's texture; as one stage its stands and dirt came from tile 7's
+        // load data (a checkerboard, big blocks).
+        int texin=0;
+        for(i=0;i<8;i++)
+        {
+            int v=raw[0][i];
+            if(v==0 || v==1 || v==2 || (i<4 && (v==8 || v==9 || v==10))) texin=1;
+        }
+        n64cycles=(texin || memcmp(raw[0],raw[1],sizeof(raw[0])))?2:1;
         for(c=0;c<n64cycles;c++)
             for(i=0;i<4;i++)
             {
@@ -6776,9 +6842,15 @@ static void rtt_end(void)
     else rdp_viewport(init.gfxwid/2,init.gfxhig/2,init.gfxwid/2,init.gfxhig/2);
     x_scissor(0,0,0,0,0);
     // RDRAM now holds the picture: textures read from it are not color
-    // buffer placeholders (cbufsource)
+    // buffer placeholders (cbufsource). The width goes too: an entry left
+    // with address 0 and its 639x320 size stood for a buffer at RDRAM 0, and
+    // Rat Attack's font at 0xA880 was drawn from placeholders (dark blocks).
     for(j=0;j<8;j++)
-        if((rst.lastcbufs[j]&0x1fffffff)==rst.rtt_addr) rst.lastcbufs[j]=0;
+        if((rst.lastcbufs[j]&0x1fffffff)==rst.rtt_addr)
+        {
+            rst.lastcbufs[j]=0;
+            rst.lastcbufwid[j]=0;
+        }
     logd("\n+rtt end %08X %i rows written back",rst.rtt_addr,h);
 }
 
@@ -7332,7 +7404,7 @@ int rdp_cmd(dword *cmd)
                 rtt_begin(RTT_H);
             if(init.viewportwid)
             {
-                xs=init.viewportwid;
+                xs=rdp_screenw();
                 if(init.viewporthig) ys=init.viewporthig;
             }
             flushprims();
@@ -8319,16 +8391,29 @@ static void bg_draw(dword base,int fmt,int siz,int pal,int imgw,int imgh,
     newmode();
 }
 
+// The S2DEX microcode cuts the frame to what the image covers, imageW/scaleW
+// by imageH/scaleH (GLideN64's port: Aw/Ah, ObjCoordinates); only a start
+// past (imageX,imageY) wraps inside that. Command & Conquer gives frames of
+// twice its images' height at scale 1 on a 640x240 screen: drawn whole, every
+// logo and text image showed twice, one copy under the other.
+static void bg_cutframe(int imgw,int imgh,float scalew,float scaleh,float *frw,float *frh)
+{
+    if(scalew>0.0f && *frw>imgw/scalew) *frw=imgw/scalew;
+    if(scaleh>0.0f && *frh>imgh/scaleh) *frh=imgh/scaleh;
+}
+
 void rdp_bgimage(dword base,int fmt,int siz,int pal,int imgw,int imgh,
                  float imgx,float imgy,float frx,float fry,float frw,float frh,
                  float scalew,float scaleh)
 {
+    bg_cutframe(imgw,imgh,scalew,scaleh,&frw,&frh);
     bg_draw(base,fmt,siz,pal,imgw,imgh,imgx,imgy,frx,fry,frw,frh,scalew,scaleh,0,0);
 }
 
 void rdp_bgimagecopy(dword base,int fmt,int siz,int pal,int imgw,int imgh,
                      float imgx,float imgy,float frx,float fry,float frw,float frh)
 {
+    bg_cutframe(imgw,imgh,1.0f,1.0f,&frw,&frh);
     bg_draw(base,fmt,siz,pal,imgw,imgh,imgx,imgy,frx,fry,frw,frh,1.0f,1.0f,1,0);
 }
 

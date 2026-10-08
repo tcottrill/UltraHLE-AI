@@ -119,6 +119,7 @@ typedef struct
     int     flat;
     int     texgen;
     int     cull;
+    int     f3dex1; // F3DEX/LX/LP 1.x: no front-face culling
     // texture scaling
     int     texenable;
     float   scales;
@@ -852,12 +853,15 @@ void g_loadvtx(dword addr,int v0,int vn)
         }
 
         // extract texture coordinates
-        if(gst.texgen && cart.dlist_zelda==1)
+        if((gst.texgen&1) && cart.dlist_zelda==1)
         { // F3DEX2 (GLideN64 gSPProcessVertex): the normal in the
           // modelview's space, measured along the look-at vectors (the
           // camera's right and up) or along x and y without them. Army Men
           // Sarge's Heroes puts a plastic shine on its soldiers this way; with
           // the vertex's own coordinates the shine covered the whole figure.
+          // G_TEXTURE_GEN_LINEAR alone generates nothing: Mario Party 3 leaves
+          // it set for its item icons, and their zero normals gave every
+          // corner the same texel (invisible items).
             const float *mv=gst.mtx[0][gst.mtxstackp[0]];
             float n[3],w[3],gx,gy,len;
             n[0]=(float)(char)(v->icol>>24);
@@ -1531,13 +1535,19 @@ void change_geom(dword x)
         gst.cull   =(x>>9)&3;
         gst.lightvx=(x&0x20000)?1:0; // 10000
         gst.texgen =(x&0xc0000)>>18; // G_TEXTURE_GEN, G_TEXTURE_GEN_LINEAR
-        gst.flat   =(x&0x80000)?1:0; //��
-        if(!(x&4)) gst.flat=0;
+        // flat: G_SHADE without G_SHADING_SMOOTH (200000, GLideN64). This
+        // read 80000, which is G_TEXTURE_GEN_LINEAR: Mario Party 3's smooth
+        // shaded item quads with that bit were drawn flat.
+        gst.flat   =(x&4) && !(x&0x200000);
         rdp_flat(gst.flat);
     }
     else
     {
         gst.cull   =(x&0x03000)>>12;
+        // F3DEX 1.x triangle code reads only G_CULL_BACK (F3DLX.Rej: andi
+        // 2000, then the area sign against 80000000); G_CULL_FRONT does
+        // nothing. Mortal Kombat 4 sets both and expects back culling.
+        if(gst.f3dex1) gst.cull&=2;
         gst.lightvx=(x&0x20000)?1:0;
         gst.texgen =(x&0xc0000)>>18;
         gst.flat   =0;
@@ -2983,6 +2993,26 @@ static int ucode_findtext(dword addr,int size,char *text)
     return(ucode);
 }
 
+// Microcodes already named in the log this game: Mario Party 3 switches
+// between three for every task, and each switch printed its line again
+// (36000 lines in one session).
+#define UCODE_LOGGED 32
+static dword ucodelogged[UCODE_LOGGED];
+static int   ucodeloggedn;
+
+void dlist_newgame(void)
+{
+    ucodeloggedn=0;
+}
+
+static int ucode_firstseen(dword crc)
+{
+    int i;
+    for(i=0;i<ucodeloggedn;i++) if(ucodelogged[i]==crc) return(0);
+    if(ucodeloggedn<UCODE_LOGGED) ucodelogged[ucodeloggedn++]=crc;
+    return(1);
+}
+
 static int dlist_detectucode(OSTask_t *task)
 {
     static dword lastaddr=0xffffffff;
@@ -3028,12 +3058,14 @@ static int dlist_detectucode(OSTask_t *task)
         }
     }
     gst.inlinedl=lastinlinedl;
-    if(gst.inlinedl) print("dlist: microcode runs inline lists (D5)\n");
-
-    print("dlist: microcode %s -> %s\n",*text?text:"(no version string)",
-        ucode==UCODE_F3D   ?"Fast3D":
-        ucode==UCODE_F3DEX ?"F3DEX":
-        ucode==UCODE_F3DEX2?"F3DEX2":"unknown, using title/autodetect");
+    if(ucode_firstseen(crc))
+    {
+        if(gst.inlinedl) print("dlist: microcode runs inline lists (D5)\n");
+        print("dlist: microcode %s -> %s\n",*text?text:"(no version string)",
+            ucode==UCODE_F3D   ?"Fast3D":
+            ucode==UCODE_F3DEX ?"F3DEX":
+            ucode==UCODE_F3DEX2?"F3DEX2":"unknown, using title/autodetect");
+    }
     lastaddr=addr;
     lastcrc=crc;
     lastsize=size;
@@ -3201,6 +3233,7 @@ int dlist_execute(OSTask_t *task)
     cart.dlist_wrusvx=0; // re-detected from this task's first G_VTX
     gst.pdvx=0;
     gst.vtxcolorbase=0;
+    gst.f3dex1=0;
     switch(dlist_detectucode(task))
     {
     case UCODE_F3D:
@@ -3214,6 +3247,7 @@ int dlist_execute(OSTask_t *task)
         cart.dlist_geyevx=0;
         cart.dlist_zelda=0;
         cart.dlist_wavevx=0;
+        gst.f3dex1=1;
         break;
     case UCODE_F3DEX2:
         cart.dlist_diddlyvx=0;

@@ -395,6 +395,7 @@ typedef struct
 
     int    viewportwid;
     int    viewporthig;
+    int    viewcropwid;  // the VI shows only this much of each line (0: all)
     int    visize;       // HLE: the size came from the game's osViSetMode
 } Init;
 

@@ -711,6 +711,7 @@ void hw_init(void)
     WSI[1]=NULLFILL;
     WSI[4]=NULLFILL;
     yieldwarned=0;
+    dlist_newgame();
 }
 
 void hw_memio(void)

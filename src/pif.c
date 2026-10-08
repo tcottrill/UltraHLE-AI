@@ -192,13 +192,14 @@ void pif_process(int padport)
               // Rumble Pak find one and saves still work (a real Controller
               // Pak echoes the 0xFE osMotorInit writes, and games then ask
               // for a Rumble Pak). Only games that tell the two apart by that
-              // probe now see a Rumble Pak.
+              // probe now see a Rumble Pak. pak=controller is for those:
+              // Wipeout 64 writes 0x80 to 0x8000, reads it back, takes the
+              // 0x80 for a Rumble Pak and says no Controller Pak is attached.
                 int  addr=((pif_get(p+3)<<8)|pif_get(p+4))&0xffe0;
                 byte data[32];
                 int  i;
-                if(addr<MEMPAK_SIZE && pak==PAK_MEMORY) memcpy(data,mempak+addr,32);
-                else memset(data,(addr>=0x8000 && addr<0x9000)?0x80:0x00,32);
-                for(i=0;i<32;i++) pif_set(r+i,data[i]);
+                if(addr<MEMPAK_SIZE && (pak==PAK_MEMORY || pak==PAK_CONTROLLER)) memcpy(data,mempak+addr,32);
+                else memset(data,(pak!=PAK_CONTROLLER && addr>=0x8000 && addr<0x9000)?0x80:0x00,32);                for(i=0;i<32;i++) pif_set(r+i,data[i]);
                 pif_set(r+32,mempak_crc(data));
             }
             else if(pl>=0 && cmd==0x03 && tx>=35 && rx>=1)
@@ -207,14 +208,13 @@ void pif_process(int padport)
                 int  addr=((pif_get(p+3)<<8)|pif_get(p+4))&0xffe0;
                 byte data[32];
                 int  i;
-                for(i=0;i<32;i++) data[i]=pif_get(p+5+i);
-                if(addr==0xc000)
+                for(i=0;i<32;i++) data[i]=pif_get(p+5+i);                if(addr==0xc000 && pak!=PAK_CONTROLLER)
                 {
                     static int seen;
                     if(data[31] && !seen) { seen=1; print("note: Rumble Pak motor on\n"); }
                     pad_rumble(pl,data[31]!=0);
                 }
-                else if(addr<MEMPAK_SIZE && pak==PAK_MEMORY && memcmp(mempak+addr,data,32))
+                else if(addr<MEMPAK_SIZE && (pak==PAK_MEMORY || pak==PAK_CONTROLLER) && memcmp(mempak+addr,data,32))
                 {
                     memcpy(mempak+addr,data,32);
                     mempak_save();

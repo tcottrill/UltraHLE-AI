@@ -326,6 +326,7 @@ EXPORT void    x_n64key(const float *center,const float *scale); // r,g,b each
 EXPORT int     x_texture(int text1handle); // single texture
 EXPORT int     x_texture2(int text1handle,int text2handle); // dual texture
 EXPORT int     x_rectclamp(int s,int t,int point);  // clamp the bound textures on these axes, point sample (sampler override)
+EXPORT void    x_growtris(float pixels); // triangles sent from now on grow outward by this many target pixels, 0 = off
 
 /****************************************************************************
 ** xtext.c

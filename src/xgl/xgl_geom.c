@@ -3,6 +3,7 @@
 
 #include "xgl_internal.h"
 #include <stddef.h>
+#include <math.h>
 
 static xt_pos *posarray;
 static int     posarraysize;
@@ -212,6 +213,110 @@ static int assemble(xgl_assembler *as,const xgl_vertex *v,xgl_vertex out[6])
     }
 }
 
+/****************************************************************************
+** triangle growth (x_growtris)
+**
+** The RDP draws every pixel a triangle covers any part of; GL only those
+** whose centre is inside. Games leave sub-pixel gaps between pieces that the
+** RDP fills: Mario Party 3's minigame board is 8 strips 37 units wide placed
+** 37.5 apart, a quarter pixel at 320x240, and drawn larger every join showed
+** as a dotted line of what lies behind. Each edge moves out by xg.grow target
+** pixels along the axes (|nx|+|ny|, as a pixel's square reaches it), below
+** half a pixel so edges on the pixel grid cover the same pixels as before.
+** The new corners take their attributes from the original triangle, the
+** perspective ones through 1/w, color and raw z linearly as the shader does.
+*/
+
+static void growtri(xgl_vertex *v)
+{
+    float hw=0.5f*(float)(xg.view_x1-xg.view_x0+1);
+    float hh=0.5f*(float)(xg.view_y1-xg.view_y0+1);
+    float px[3],py[3],nx[3],ny[3],c[3],qx[3],qy[3];
+    float area,sgn,maxd=4.0f*xg.grow;
+    xgl_vertex o[3];
+    int   i,j,k,rawz=1;
+
+    for(i=0;i<3;i++)
+    {
+        if(!(v[i].w>1e-6f)) return; // crossing the eye plane: as it is
+        px[i]=v[i].x/v[i].w*hw;
+        py[i]=v[i].y/v[i].w*hh;
+        if(v[i].zs<0.0f) rawz=0;
+    }
+    area=(px[1]-px[0])*(py[2]-py[0])-(px[2]-px[0])*(py[1]-py[0]);
+    if(fabsf(area)<1e-4f) return;
+    sgn=area>0.0f?1.0f:-1.0f;
+    // edge i runs from corner i to i+1; n points out of the triangle
+    for(i=0;i<3;i++)
+    {
+        float ex,ey,len;
+        j=(i+1)%3;
+        ex=px[j]-px[i];
+        ey=py[j]-py[i];
+        len=sqrtf(ex*ex+ey*ey);
+        if(len<1e-4f) return;
+        nx[i]= ey/len*sgn;
+        ny[i]=-ex/len*sgn;
+        c[i]=nx[i]*px[i]+ny[i]*py[i]+xg.grow*(fabsf(nx[i])+fabsf(ny[i]));
+    }
+    // corner i where the moved edges i-1 and i meet, kept near the old one
+    // at sharp corners
+    for(i=0;i<3;i++)
+    {
+        float det,dx,dy,d;
+        k=(i+2)%3;
+        det=nx[k]*ny[i]-ny[k]*nx[i];
+        if(fabsf(det)<1e-6f) return;
+        qx[i]=(c[k]*ny[i]-ny[k]*c[i])/det;
+        qy[i]=(nx[k]*c[i]-c[k]*nx[i])/det;
+        dx=qx[i]-px[i];
+        dy=qy[i]-py[i];
+        d=sqrtf(dx*dx+dy*dy);
+        if(d>maxd)
+        {
+            qx[i]=px[i]+dx*maxd/d;
+            qy[i]=py[i]+dy*maxd/d;
+        }
+    }
+    for(i=0;i<3;i++)
+    {
+        float b[3],kw[3],sum=0.0f,ix,iy;
+        // barycentrics of the new corner in the old triangle (screen space)
+        for(j=0;j<3;j++)
+        {
+            int j1=(j+1)%3,j2=(j+2)%3;
+            b[j]=((px[j1]-qx[i])*(py[j2]-qy[i])-(px[j2]-qx[i])*(py[j1]-qy[i]))/area;
+            kw[j]=b[j]/v[j].w;
+            sum+=kw[j];
+        }
+        if(!(sum>1e-12f)) return;
+        o[i]=v[i];  // flat inputs (c1) stay the corner's own
+        o[i].w=1.0f/sum;
+        ix=qx[i]/hw;
+        iy=qy[i]/hh;
+        o[i].x=ix*o[i].w;
+        o[i].y=iy*o[i].w;
+        o[i].s1=o[i].t1=o[i].s2=o[i].t2=0.0f;
+        o[i].r=o[i].g=o[i].b=o[i].a=0.0f;
+        o[i].zs=rawz?0.0f:-1.0f;
+        for(j=0;j<3;j++)
+        {
+            float p=kw[j]/sum;
+            o[i].s1+=p*v[j].s1; o[i].t1+=p*v[j].t1;
+            o[i].s2+=p*v[j].s2; o[i].t2+=p*v[j].t2;
+            o[i].r +=b[j]*v[j].r; o[i].g+=b[j]*v[j].g;
+            o[i].b +=b[j]*v[j].b; o[i].a+=b[j]*v[j].a;
+            if(rawz) o[i].zs+=b[j]*v[j].zs;
+        }
+    }
+    v[0]=o[0]; v[1]=o[1]; v[2]=o[2];
+}
+
+void x_growtris(float pixels)
+{
+    xg.grow=pixels>0.0f?pixels:0.0f;
+}
+
 void x_begin(int type)
 {
     memset(&xg.as,0,sizeof(xg.as));
@@ -247,6 +352,7 @@ void x_vx(xt_pos *p,xt_data *d)
 
     n=assemble(&xg.as,&v,out);
     if(!n) return;
+    if(xg.grow>0.0f) for(i=0;i<n;i+=3) growtri(out+i);
     if(xg.batchn+n>XGL_BATCHVX) x_flush();
     for(i=0;i<n;i++) xg.batch[xg.batchn++]=out[i];
     xgl_stats.in_tri+=n/3;

@@ -56,6 +56,7 @@ typedef struct
     xgl_vertex    batch[XGL_BATCHVX];
     int           batchn;
     xgl_assembler as;
+    float         grow;     // x_growtris: target pixels, 0 = off
 
     // viewport, GL-origin (y runs up from the bottom, inclusive), and depth
     // range; converted from x_viewport's x_* coordinates (y runs down) the
