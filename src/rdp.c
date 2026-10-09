@@ -3118,9 +3118,10 @@ void flushprims(void)
         }
         else
         {
-            int bl=rst.s_c==&comn64?rst.s_blend1:COM.blend1[0];
-            if(bl==X_ALPHA) x_alphatest(0.05);
-            else x_alphatest(1.0);
+            // Blending does not imply alpha rejection. THPS3 restores depth
+            // after its shadow with alpha-zero geometry: discarding those
+            // fragments leaves the shadow's primitive z in front of the skater.
+            x_alphatest(1.0);
         }
         // Fill mode writes the fill color with no blender or alpha compare.
         // Its rectangles have alpha 0 (no shade), and a blender left in the

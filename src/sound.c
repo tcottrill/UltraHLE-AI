@@ -180,6 +180,7 @@ int  sound_add(short *data0,int bytes)
     if(!initdone || !sbuf) return(-2);
     if(bytes<=0 || bytes>65535) return(-1);
 
+
     {
         LPVOID  data1;
         DWORD   size1;

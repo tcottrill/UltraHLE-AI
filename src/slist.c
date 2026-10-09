@@ -521,7 +521,7 @@ void adpcm(dword m_state,int src,int dst,int cnt,int flags)
 
 
 // Mupen64Plus alist_resample (audio.c RESAMPLE_LUT): the microcode's 4-tap
-// resampler, 64 filter phases. Used for NEAD (ABI2): the linear one below
+// resampler, 64 filter phases. Used for NEAD and NAUDIO: the linear one below
 // writes 16 samples past its count and keeps 8 samples of history; its
 // output differed from Star Fox 64's microcode's by up to 52743.
 static const short resample_lutab[64*4]={
@@ -1495,7 +1495,10 @@ case 0x5: // RESAMPLE
 
         if(st.dumpsnd) loga("%04X -> %04X (%03X) speed %04X",
             sst.in,sst.out,sst.cnt,speed);
-        resample(state,sst.in,sst.out,sst.cnt,flags,speed);
+        // NAUDIO uses the same four-tap filter and 10-byte history as NEAD.
+        // The legacy linear path writes 16 extra samples into the next
+        // buffer, corrupting Nuclear Strike's adjacent voice input.
+        resample_lut(state,sst.in,sst.out,sst.cnt,flags&1,(dword)speed<<1);
     } break;
 case 0xC: // MIXER
     {

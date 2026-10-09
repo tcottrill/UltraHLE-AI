@@ -125,8 +125,9 @@ void sync_audio(void)
             }
         }
 
-        if(st.timing) a=51;
-        else a=61;
+        // Match the nominal VI rate used by the emulated Count and AI clocks.
+        if(st.timing) a=50;
+        else a=60;
              if(st2.audiostatus>1)  a-=8;
         else if(st2.audiostatus<-1) a+=16;
         else if(st2.audiostatus>0)  a-=3;
