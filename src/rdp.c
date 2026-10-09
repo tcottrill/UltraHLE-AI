@@ -2569,6 +2569,13 @@ void txt_prepare(int tile)
     Texture *txt;
     int      match=0,crcerror=0,sizeok;
 
+    // Unset size registers have inclusive endpoints (0,0)-(0,0): one
+    // texel, not a missing texture. Gauntlet's health overlay reads this
+    // default second tile's alpha from TMEM; an unbound GL texture has
+    // alpha 1 and paints opaque boxes over the heart and digits.
+    if(!t->xs && !t->ys && !t->x0 && !t->y0 && !t->x1 && !t->y1)
+        t->xs=t->ys=1;
+
     sizeok=0;
     // buf1/buf2 hold 65536 texels: up to 16384 before mirroring in x and y
     if((unsigned)t->xs<=1024 && (unsigned)t->ys<=1024 && t->xs*t->ys<=16384) sizeok=1;
@@ -3037,9 +3044,21 @@ static void drawprims_dump(int i0,int i1)
                     vx->ct[0],vx->ct[1],
                     vx->cc[0],vx->cc[1],vx->cc[2],vx->cc[3]);
                 if(rst.flat && j==2) logd(" (flat)");
+                logd(" zs=%.9g",vx->zs);
             }
         }
     }
+}
+
+static int depthcompare(void)
+{
+    if(!rst.s_zcmp) return X_DISABLE;
+    // Translucent mode requires strictly in front (RDP z_compare;
+    // GLideN64 _updateDepthCompare). Harvest Moon's character and shadow
+    // sprites have equal z: LEQUAL paints the shadow over the character.
+    // Keep the GLideN64 maximum primitive-depth exception for cleared z.
+    if(rst.s_zmode==2 && !(rst.s_zsrc && rst.primz==1.0f)) return X_TESTLT;
+    return X_ENABLE;
 }
 
 // draw primitives collected since last modechange
@@ -3142,7 +3161,7 @@ void flushprims(void)
         x_n64convert(rst.k4,rst.k5);
         x_n64key(rst.keycenter,rst.keyscale);
         x_mask(X_ENABLE,rst.s_zupd?X_ENABLE:X_DISABLE,
-                        rst.s_zcmp?X_ENABLE:X_DISABLE);
+                        depthcompare());
         if(COM.texenable) txt_select2(0,1);
         drawprims_n64(i0,i1);
         return;
@@ -3194,7 +3213,7 @@ void flushprims(void)
             else if(i==0)
             {
                 x_mask(X_ENABLE,rst.s_zupd?X_ENABLE:X_DISABLE,
-                                rst.s_zcmp?X_ENABLE:X_DISABLE);
+                                depthcompare());
             }
             if(COM.texenable)
             {
@@ -6579,7 +6598,7 @@ static int rtt_offscreen(void)
 // screen in strips: drawn on the screen instead, the strips were color
 // buffer placeholders (a dark pattern where the panel belongs).
 #define RTT_UNSHOWN 3 // frames set without being shown
-static int rtt_secondscreen(void)
+static int rtt_secondscreen(int x0,int y0,int x1,int y1)
 {
     dword c=rst.bufbase[RDP_BUF_C];
     int   w=rst.bufwid[RDP_BUF_C],j;
@@ -6590,6 +6609,17 @@ static int rtt_secondscreen(void)
     // a second one with a z image of its own is a picture of its own,
     // whatever the VI has done
     if(rst.framecbuf && c!=rst.framecbuf && rst.bufbase[RDP_BUF_Z]!=rst.framezbuf) return(1);
+    // A full-width top strip can be a persistent panel on its first draw,
+    // before the VI has presented anything (Gauntlet's 288x50 HUD). Waiting
+    // for VI activity or three frames loses its one-time initialization.
+    // Coordinates are still 10.2. Keep all known-screen exclusions: a
+    // scissor on a displayed buffer does not make it a separate picture.
+    if(!vi_hasshown(c) && x0==0 && y0==0 && x1==w*4 && y1>0 &&
+       init.viewporthig>0 && y1*3<=init.viewporthig*4)
+    {
+        for(j=0;j<8;j++) if(rst.fronthist[j]==(c&0x1fffffff)) return(0);
+        return(1);
+    }
     if(!vi_presents() || vi_hasshown(c)) return(0);
     if(rst.framecbuf && c!=rst.framecbuf) return(1);
     // nor presented as a frame: Kraken64's frames are shown at their
@@ -7449,7 +7479,8 @@ int rdp_cmd(dword *cmd)
                (rst.bufwid[RDP_BUF_C]==320 || rst.bufwid[RDP_BUF_C]==640) &&
                rst.buffmt[RDP_BUF_C]==0 && rst.bufbpp[RDP_BUF_C]==2)
                 rtt_begin(RTT_SMALLH);
-            else if(!rst.rtt_on && rtt_secondscreen())
+            else if(!rst.rtt_on && rtt_secondscreen(FIELD(cmd[0],12,12),FIELD(cmd[0],0,12),
+                                                  FIELD(cmd[1],12,12),FIELD(cmd[1],0,12)))
                 rtt_begin(RTT_H);
             if(init.viewportwid)
             {

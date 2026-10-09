@@ -313,6 +313,12 @@ static void growtri(xgl_vertex *v)
         if(!(sum>1e-12f)) return;
         o[i]=v[i];  // flat inputs (c1) stay the corner's own
         o[i].w=1.0f/sum;
+        // Preserve constant planes exactly. The independently rounded
+        // barycentrics need not sum to one; even a one-ULP depth change can
+        // make adjoining sprite strips fail GL_LEQUAL against each other
+        // (Harvest Moon's clouds). Keep w constant too, since the shader
+        // reconstructs clip z from zs*w before GL divides by w again.
+        if(v[0].w==v[1].w && v[0].w==v[2].w) o[i].w=v[0].w;
         ix=qx[i]/hw;
         iy=qy[i]/hh;
         o[i].x=ix*o[i].w;
@@ -329,6 +335,7 @@ static void growtri(xgl_vertex *v)
             o[i].b +=b[j]*v[j].b; o[i].a+=b[j]*v[j].a;
             if(rawz) o[i].zs+=b[j]*v[j].zs;
         }
+        if(rawz && v[0].zs==v[1].zs && v[0].zs==v[2].zs) o[i].zs=v[0].zs;
         // A wall seen edge-on changes depth steeply across it (Mace's book
         // pages: two layers a pixel apart, w 995 and 1008); grown 0.4 pixel
         // its depth went far outside its own range and a dotted line of the
