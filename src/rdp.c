@@ -327,6 +327,8 @@ typedef struct
     int       view_x1;
     int       view_y0;
     int       view_y1;
+    int       view_flipx;        // negative scale: the picture mirrored
+    int       view_flipy;
 
     // active colors
     byte      col[C_NUM][4];
@@ -783,7 +785,7 @@ Vertex *newvx(void)
         i=MAXVX-1; // reuse the last slot rather than write past the table
     }
     else i=rst.vxtabi++;
-    rst.vxtab[i].zs=rst.rectzon?rst.primz:-1.0f; // depth from pos[2] (w)
+    rst.vxtab[i].zs=rst.rectzon?rst.primz:X_ZFROMW; // depth from pos[2] (w)
     rst.vxtab[i].col[0]=1.0f;
     rst.vxtab[i].col[1]=0.0f;
     rst.vxtab[i].col[2]=1.0f;
@@ -941,6 +943,8 @@ void viewport(int rectmode)
         y1=y1*0.48+240*1.01;
     }
     x_viewport(x0,y0,x1,y1);
+    if(rectmode) x_viewflip(0,0);
+    else         x_viewflip(rst.view_flipx,rst.view_flipy);
 
     // add to wirelist
     {
@@ -1220,22 +1224,21 @@ int txt_checkalpha(byte *dst,int dx,int dy)
     return(0);
 }
 
-// A texture rectangle drawn 1:1 from whole texels of an unshifted tile, the
-// whole tile and nothing else: one piece of a larger picture. The RDP
-// samples each texel's centre and its filter blends nothing; drawn larger
-// here, it is point sampled and its texture is not bled (txt_keybleed).
-// Filtered, every piece ends at its own edge and the picture shows seams
-// (Mario Kart 64's player select portraits, four 32x32 pieces). A rectangle
-// that cuts a part out of its tile, a glyph from a font atlas, is filtered
-// like any other: point sampled at 2x, Beetle Adventure Racing's 4-bit
-// alpha font showed its edge texels as dark stripes inside the letters,
-// where Project64 draws it smooth.
+// A texture rectangle drawn 1:1 from an unshifted tile. The RDP samples each
+// texel once and its filter blends nothing; drawn larger here, it is point
+// sampled and its texture is not bled (txt_keybleed): the console's pixels,
+// doubled. Filtered, pieces of a larger picture each ended at their own edge
+// and the picture showed seams (Mario Kart 64's player select portraits,
+// Mario Party 3's board backgrounds). Cut-outs too since 2026-10-08: only
+// whole tiles qualified before, and Paper Mario's dialogue letters (15 of 16
+// rows) were soft beside the point-sampled invitation card on the same
+// screen. (Beetle Adventure Racing's 4-bit alpha font had been kept filtered
+// because point sampled its edge texels showed as dark stripes inside the
+// letters; check it if that returns.)
 static int rect_texelexact(TexRect *tr,Tile *t)
 {
     return(rst.s_cycles<=2 && !t->shifts && !t->shiftt &&
-           tr->s1==1024.0f && tr->t1==1024.0f &&
-           tr->s0==8.0f*t->x0full && tr->t0==8.0f*t->y0full &&
-           ceilf(tr->x0)-tr->x1==(float)t->xs && ceilf(tr->y0)-tr->y1==(float)t->ys);
+           tr->s1==1024.0f && tr->t1==1024.0f);
 }
 
 // A transparent texel (alpha 0) next to visible ones takes their average
@@ -3110,7 +3113,12 @@ void flushprims(void)
     {
         rst.lastzmode=rst.s_zmode;
 
-        if(rst.s_zmode>0) x_zdecal(1.01);
+        // Only decals are pulled toward the eye (GLideN64: polygon offset for
+        // ZMODE_DEC alone). Interpenetrating and translucent surfaces got it
+        // too: Batman Beyond draws its rooms' walls and floor in the
+        // interpenetrating mode, and pulled forward they flickered over
+        // other geometry as the camera moved.
+        if(rst.s_zmode==3) x_zdecal(1.01);
         else x_zdecal(1.0);
     }
 
@@ -3400,11 +3408,12 @@ void rdp_fillrect(TexRect *tr)
         x_clear(0,1,0,0,0);
         return;
     }
-    if(rst.rawfillcolor==0xFFFCFFFC)
-    {
-        // z-buffer clear value into a color buffer
+    // z-buffer clear value into a color buffer. Fill mode only: in 1/2-cycle
+    // mode the fill colour isn't used, and Ridge Racer 64 draws its start
+    // board's LED digits as 2x1 prim-colour rectangles while the fill colour
+    // is still the frame's depth clear: all 667 were dropped, a blank board.
+    if(rst.s_cycles==4 && rst.rawfillcolor==0xFFFCFFFC)
         return;
-    }
 
     rst.fillrectcnt++;
 
@@ -3668,8 +3677,34 @@ void rdp_texrect(TexRect *tr)
         // above 1x floors to its own pixel's texel; centred, the left half
         // of each took the texel before (Bust-A-Move 2's Taito logo half an
         // N64 pixel right and down at 2x). GLideN64 drops the half too.
+        // The upper left edge rounds up as well: without anti-aliasing the
+        // RDP writes a pixel only when its top left sample is inside
+        // (angrylion blender_1cycle, cvbit), so a pixel on a fractional edge
+        // belongs to the left/upper neighbour alone. GL drew it for both;
+        // blended, it was blended twice: bright lines between the pieces
+        // of Batman Beyond's fading logos (joins at x 268.25, y 186.25).
+        // The texture start moves with the edge, every pixel keeps its texel.
         float ds=tr->s1/32.0f,dt=tr->t1/32.0f;
         float half=txt_pointsampled()?0.0f:0.5f;
+        // (Flipped rectangles, s down and t across, stay as they were.)
+        // A rectangle drawn 1:1 from a half-pixel position keeps its first
+        // texel on its first pixel: the RDP draws it texel for texel
+        // (rect_texelexact); shifted half a texel, point sampled at 2x, every
+        // texel would straddle two pixels. Mario Party 3's board backgrounds
+        // are 64x32 pieces at x 0.5, 64.5, ...; filtered, each ended at its
+        // own edge and the picture showed a grid of seams.
+        if(!tr->flip)
+        {
+            int onetoone=rect_texelexact(tr,TEXTILE(0));
+            float cx=ceilf(tr->x1)-tr->x1,cy=ceilf(tr->y1)-tr->y1;
+            tr->x1+=cx;
+            tr->y1+=cy;
+            if(!onetoone)
+            {
+                tr->s0+=cx*ds;
+                tr->t0+=cy*dt;
+            }
+        }
         tr->x0=ceilf(tr->x0);
         tr->y0=ceilf(tr->y0);
         u0=tr->s0-half*ds;
@@ -3858,6 +3893,13 @@ void rdp_viewport(float xm,float ym,float xa,float ya)
     ym*=(float)init.gfxhig/ys;
     xa*=(float)init.gfxwid/xs;
     ya*=(float)init.gfxhig/ys;
+    // A negative scale mirrors the picture (Ridge Racer 64's rear-view
+    // mirror, x scale -62). Taken as is, the viewport ran from x 222 to 97
+    // and glViewport got a width of 1: the mirror showed only its backdrop.
+    rst.view_flipx=xm<0.0f;
+    rst.view_flipy=ym<0.0f;
+    if(xm<0.0f) xm=-xm;
+    if(ym<0.0f) ym=-ym;
     rst.view_x0=xa-xm;
     rst.view_y0=ya-ym;
     rst.view_x1=xa+xm-1;
@@ -3871,6 +3913,13 @@ void rdp_viewport(float xm,float ym,float xa,float ya)
         rst.view_x1,rst.view_y1);
     rst.rectmode=-1; // viewport() skips when the draw mode is unchanged
     realdrawmode();
+}
+
+// the current 3D viewport mirrors one axis (negative scale): HLE culling
+// sees every triangle's winding reversed
+int rdp_viewmirrored(void)
+{
+    return(rst.view_flipx!=rst.view_flipy);
 }
 
 static void settexturetile(int tile)
@@ -4009,7 +4058,7 @@ void rdp_newvtx(int first,int num)
     for(i=first;i<num;i++)
     {
         rdpvx[i]=rst.vxtab+rst.vxtabi;
-        rdpvx[i]->zs=-1.0f; // depth from w (the slot may hold a raw-RDP z)
+        rdpvx[i]->zs=X_ZFROMW; // depth from w (the slot may hold a raw-RDP z)
         rst.vxtabi++;
     }
 }
@@ -7551,7 +7600,7 @@ void rdp_framestart(void)
 
     rst.testcnt=0;
 
-    for(i=0;i<MAXRDPVX;i++) { rdpvx[i]=rdpdummyvx+i; rdpdummyvx[i].zs=-1.0f; }
+    for(i=0;i<MAXRDPVX;i++) { rdpvx[i]=rdpdummyvx+i; rdpdummyvx[i].zs=X_ZFROMW; }
 
     if(rst.myframe<=0) rst.myframe=1;
 

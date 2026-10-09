@@ -1014,11 +1014,19 @@ static void pi_advance(dword len,int toram)
 // the DRAM misalignment shortens blocks and the first short block is written
 // bytewise. Leaves PI_DRAM_ADDR, PI_CART_ADDR and PI_WR_LEN as the hardware
 // does (n64-systemtest cart_memory "DMA CART -> RDRAM ...").
+// An address no device answers reads the open bus (ares PI::busAddress): the
+// low 16 bits of the address last put on the bus, at the start and at each
+// bus page. Paper Mario reads flash page -1 for an empty file slot (cart
+// 0x1FFFE000) and expects it not to hold a save; RDRAM left untouched showed
+// the last loaded file in every empty slot.
 static void pi_dmawrite(void)
 {
     byte  buf[130];
-    dword dram=WPI[0]&0x00fffffe,pbus=WPI[1]&~1u,wlen=0;
+    dword dram=WPI[0]&0x00fffffe,pbus=WPI[1]&~1u,wlen=0,latch=0;
     int   length=(int)(WPI[3]&0x00ffffff)+1,maxblock=128,first=1;
+    int   rom=(pbus>=0x10000000 && pbus<0x1fc00000),selected=0;
+    int   dom2=((pbus>>24)==0x05 || ((pbus>>24)>=0x08 && (pbus>>24)<=0x0f));
+    dword pagemask=(1u<<(((dom2?WPI[11]:WPI[7])&15)+2))-1; // PI_BSD_DOMx_PGS
 
     while(length>0)
     {
@@ -1029,7 +1037,13 @@ static void pi_dmawrite(void)
         int i;
         for(i=0;i<curlen;i+=2)
         {
-            dword h=(dword)mem_read16(0xA0000000|(pbus&0x1fffffff));
+            dword h;
+            if(rom) h=(dword)mem_read16(0xA0000000|(pbus&0x1fffffff));
+            else
+            {
+                if(!selected || (pbus&pagemask)==0) { latch=pbus&0xffff; selected=1; }
+                h=latch;
+            }
             buf[i]=(byte)(h>>8);
             buf[i+1]=(byte)h;
             pbus+=2;
@@ -1239,11 +1253,20 @@ void lle_hwwrite(dword phys)
                         WPI[1],WPI[0],WPI[3]+1,st.pc,st.g[31].d);
                 if(cartaddr>=0x10000000 && cartaddr<0x1fc00000)
                     pi_dmawrite();
-                else
+                else if(flash_contains(cartaddr))
                 {
-                    if(flash_contains(cartaddr)) flash_dmatoram(cartaddr,WPI[0]&0x1fffffff,WPI[3]+1);
-                    else hw_unknown(7,phys,cartaddr); // SRAM probe
+                    flash_dmatoram(cartaddr,WPI[0]&0x1fffffff,WPI[3]+1);
                     pi_advance(WPI[3]+1,1);
+                }
+                else if(cartaddr>=0x1fc00000 && cartaddr<0x1fd00000)
+                {
+                    hw_unknown(7,phys,cartaddr); // PIF
+                    pi_advance(WPI[3]+1,1);
+                }
+                else
+                { // no device there: open bus (pi_dmawrite)
+                    hw_unknown(7,phys,cartaddr);
+                    pi_dmawrite();
                 }
                 WPI[3]=0;
                 RPI[4]|=1u; // DMA busy until the interrupt (lle_irqfired)

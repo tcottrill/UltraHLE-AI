@@ -8,10 +8,11 @@ static const char *vs_src=
 "layout(location=1) in vec4 a_col;\n"
 "layout(location=2) in vec2 a_tex1;\n"
 "layout(location=3) in vec2 a_tex2;\n"
-"layout(location=4) in float a_zs;\n"            // screen depth 0..1, <0: from w
+"layout(location=4) in float a_zs;\n"            // screen depth (0..1 near to far), X_ZFROMW: from w
 "layout(location=5) in vec4 a_clamp1;\n"         // texture 1 sampled inside xy..zw
 "uniform float u_deptha;\n"
 "uniform float u_depthb;\n"
+"uniform vec2  u_flip;\n"                        // -1: the viewport's scale is negative
 "noperspective out vec4 v_col;\n"                // Glide iterates color in screen space
 "out vec2  v_tex1;\n"
 "out vec2  v_tex2;\n"
@@ -23,8 +24,8 @@ static const char *vs_src=
 // raw RDP triangles carry the RDP's own z, linear in screen space as the
 // RDP interpolates it (z/w is what GL interpolates linearly), separate
 // from the perspective w that corrects the texture coordinates
-"    float z=(a_zs>=0.0)?(2.0*a_zs-1.0)*w:u_deptha*w+u_depthb;\n"
-"    gl_Position=vec4(a_pos.x,a_pos.y,z,w);\n"
+"    float z=(a_zs>-1.0e29)?(2.0*a_zs-1.0)*w:u_deptha*w+u_depthb;\n"
+"    gl_Position=vec4(a_pos.x*u_flip.x,a_pos.y*u_flip.y,z,w);\n"
 "    v_col=clamp(a_col,0.0,1.0);\n"
 "    v_tex1=a_tex1;\n"
 "    v_tex2=a_tex2;\n"
@@ -285,6 +286,9 @@ int xgl_shader_create(void)
     xg.u_fogcolor =glGetUniformLocation(xg.prog,"u_fogcolor");
     xg.u_deptha   =glGetUniformLocation(xg.prog,"u_deptha");
     xg.u_depthb   =glGetUniformLocation(xg.prog,"u_depthb");
+    xg.u_flip     =glGetUniformLocation(xg.prog,"u_flip");
+    glUseProgram(xg.prog);
+    glUniform2f(xg.u_flip,1.0f,1.0f); // not mirrored until x_viewflip
     xg.u_n64cyc   =glGetUniformLocation(xg.prog,"u_n64cyc");
     xg.u_cc0      =glGetUniformLocation(xg.prog,"u_cc0");
     xg.u_cc1      =glGetUniformLocation(xg.prog,"u_cc1");

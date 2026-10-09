@@ -77,6 +77,7 @@ void rdp_dupvtx(int i);
 void rdp_tri(int *vind);
 void rdp_fogrange(float min,float max); // set fog range (fogcolor used)
 void rdp_viewport(float xm,float ym,float xa,float ya);
+int  rdp_viewmirrored(void); // 3D viewport mirrors one axis (culling reverses)
 void rdp_gameviewport(float xm,float ym,float xa,float ya); // G_MV_VIEWPORT
 void rdp_flat(int flat);
 

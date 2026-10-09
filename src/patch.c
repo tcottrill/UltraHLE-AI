@@ -102,6 +102,22 @@ void p_osEPiStartDma(void)
     V0.d=osEPiStartDma(A0.d,A1.d,A2.d);
 }
 
+// __osEPiRawWriteIo(handle,devAddr,data) stores data at the handle's
+// baseAddress|devAddr. Only the save chip's registers react (flash.c); the
+// routine used to be skipped, so FlashRAM commands never arrived in HLE OS
+// mode, the first DMA took the chip for SRAM and Pokémon Stadium's
+// registered teams were lost
+void p_osEPiRawWriteIo(void)
+{
+    dword phys=(mem_read32(A0.d+12)|A1.d)&0x1fffffff; // OSPiHandle.baseAddress
+    if(flash_contains(phys))
+    {
+        mem_write32(0xA0000000|(phys&~3u),A2.d);
+        flash_hwwrite(phys&~3u);
+    }
+    V0.d=0;
+}
+
 void p_osSetEventMessage(void)
 {
     osSetEventMessage(A0.d,A1.d,A2.d);
@@ -674,6 +690,7 @@ p_osContReset,
 p_osIntMask,
 p_osDpGetStatus,
 p_osDpSetStatus,
+p_osEPiRawWriteIo,
 NULL};
 
 void op_patch(int patch)

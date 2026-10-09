@@ -968,6 +968,14 @@ static void op_writemem(dword opcode,int bytes)
         else if(flash_contains(phys)) flash_hwwrite(phys&~3u);
         else if((phys&~3u)==LLE_ISVIEWER+0x14) lle_isviewer();
     }
+    // HLE OS mode: the save chip's registers too, when the game's own
+    // __osEPiRawWriteIo runs (Pokémon Stadium: FlashRAM commands were lost
+    // and the chip taken for SRAM)
+    else if(!st.lleos && ((dword)a&0xC0000000)==0x80000000
+         && flash_contains((dword)a&0x1fffffff))
+    {
+        flash_hwwrite((dword)a&0x1ffffffc);
+    }
     // HLE OS mode: a game whose osAiSetNextBuffer wasn't found writes AI_LEN
     // itself. The buffer goes to the HLE AI FIFO as the patched routine's
     // would; since 385a8dd only buffers the FIFO takes are played, and

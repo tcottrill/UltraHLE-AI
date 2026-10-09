@@ -952,12 +952,21 @@ void g_loadvtx(dword addr,int v0,int vn)
             // Road Rash 64 draws its scene in passes whose projections differ
             // by a scale (near planes 4, 10 and 100), the same picture with
             // w ten times apart, and the road covered the riders.
-            else if(v->pos[2]>0.0f)
+            // The shader rebuilds clip depth as (2*zs-1)*w, linear in clip
+            // space for any w only if zs isn't clamped: a vertex between the
+            // eye and the near plane (zs<0) or behind the eye (w<0) keeps its
+            // value, and GL cuts the triangle at the near plane in the right
+            // place (GLideN64 passes clip z straight to gl_Position).
+            // Clamped to 0, or with no screen depth for w<=0, Mario 64's
+            // ground triangles running under the camera got a wrong depth
+            // and the sand drawn after them covered the grass near Mario.
+            // Only the far side is clamped (the RDP clamps, doesn't clip).
+            else if(fabsf(v->pos[2])>1e-6f)
             {
                 // Viewport Z has ten fractional bits (GLideN64 gSPViewport).
                 // Dividing by G_MAXZ instead shifts the CPU-visible depth.
                 float zs=(zc/v->pos[2]*g_vpzscale+g_vpztrans)*(1.0f/1024.0f);
-                v->zs=zs<0.0f?0.0f:(zs>1.0f?1.0f:zs);
+                v->zs=(v->pos[2]>0.0f && zs>1.0f)?1.0f:zs;
             }
         }
 
@@ -1098,6 +1107,10 @@ int g_culltri(int *vxind)
         z=(xd1*yd2)-(xd2*yd1);
         d=x*bx+y*by+z*bz;
     }
+    // The RSP tells front from back after the viewport; a viewport that
+    // mirrors one axis (Ridge Racer 64's rear-view mirror) reverses every
+    // winding, so the faces it keeps are the ones that look back here.
+    if(rdp_viewmirrored()) d=-d;
     if((gst.cull&1) && d<=0) return(1);
     if((gst.cull&2) && d>=0) return(1);
     return(0);

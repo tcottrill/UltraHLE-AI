@@ -381,6 +381,7 @@ EXPORT void    x_closetexturedata(int handle);
 
 // projection setup
 EXPORT void    x_viewport(float x0,float y0,float x1,float y1);
+EXPORT void    x_viewflip(int fx,int fy); // mirror x/y inside the viewport (negative scale)
 EXPORT void    x_scissor(int on,float x0,float y0,float x1,float y1); // RDP scissor, x1/y1 exclusive
 // render to texture: draw into a w x h offscreen target (rgba: its starting
 // picture, top row first, or NULL), read rows back as RGBA8, return
@@ -431,6 +432,11 @@ EXPORT void    x_vxarray(xt_pos *pos,int size,char *mask);
 #define x_vxtexp(zs,zt,zw)       g_data.t1s=(zs), g_data.t1t=(zt), g_data.t1w=(zw)
 #define x_vxtex2(zs,zt)          g_data.t2s=(zs), g_data.t2t=(zt)
 #define x_vxdepth(z)             g_data.zs=(z)
+// x_vxdepth value for "no screen depth, take it from w". Screen depths may be
+// negative (a vertex between the eye and the near plane) or anything for one
+// behind the eye, so the marker is far outside any real one.
+#define X_ZFROMW                 (-1.0e30f)
+#define X_HASZS(z)               ((z)>-1.0e29f)
 #define x_vxtexclamp(s0,t0,s1,t1) g_data.t1clamp=1, g_data.t1c[0]=(s0), g_data.t1c[1]=(t0), g_data.t1c[2]=(s1), g_data.t1c[3]=(t1)
 #define x_vxtex2v(st)            g_data.t2s=((float *)(st))[0], g_data.t2t=((float *)(st))[1]
 #define x_vxpos(zx,zy,zz)        g_pos.x=(zx), g_pos.y=(zy), g_pos.z=(zz), x_vx(&g_pos,&g_data)

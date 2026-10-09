@@ -42,6 +42,8 @@ static struct
     byte    tmem[4096];      // N64 byte order
     dword   zaddr;           // SET_Z_IMAGE: 16-bit depth image, color width
     int     primz;           // SET_PRIM_DEPTH z, 18-bit like interpolated z
+    int     primdz;          // SET_PRIM_DEPTH delta z (16 bits)
+    int     dzpix;           // the primitive's depth slope, a power of two
     int     k[6];            // SET_CONVERT K0..K5 (K4/K5 reach the combiner)
     int     keyc[3],keys[3]; // SET_KEY_R/GB: key center and scale, r g b
 } rs;
@@ -177,11 +179,22 @@ static void fbwrite(int x,int y,const Color *c)
     else             wr16(a,pack16(c));
 }
 
+// Each depth word keeps the 4-bit exponent of its pixel's depth slope (dz):
+// 2 bits in the word, 2 in the RDRAM's hidden bits, kept here per halfword.
+static byte zhidden[0x400000];
+
 static void fbfill(int x,int y)
 {
     dword a=rs.ciaddr+(dword)(y*rs.ciwidth+x)*(rs.cisize==3?4:2);
     if(rs.cisize==3) wr32(a,rs.fill);
-    else             wr16(a,(x&1)?rs.fill&0xffff:rs.fill>>16);
+    else
+    {
+        // the hidden bits follow the colour's low bit (angrylion fbfill_16);
+        // a depth clear (0xFFFC) leaves dz 0
+        dword c=(x&1)?rs.fill&0xffff:rs.fill>>16;
+        wr16(a,c);
+        zhidden[(a>>1)&0x3fffff]=(c&1)?3:0;
+    }
 }
 
 /****************************************************************************
@@ -216,19 +229,82 @@ static dword zaddress(int x,int y)
     return(rs.zaddr+(dword)(y*rs.ciwidth+x)*2);
 }
 
-// z test (z<0: the primitive has no depth): nearer (smaller) passes; decal
-// mode also passes an equal depth, for surfaces drawn over themselves
+// angrylion normalize_dzpix: |dz/dx|+|dz/dy| as a power of two
+static int dz_normalize(int sum)
+{
+    int count;
+    if(sum&0xc000) return(0x8000);
+    if(!(sum&0xffff)) return(1);
+    if(sum==1) return(3);
+    for(count=0x2000;count>0;count>>=1) if(sum&count) return(count<<1);
+    return(0);
+}
+
+static int dz_compress(int v) // power of two -> exponent 0..15
+{
+    int j=0;
+    if(v&0xff00) j|=8;
+    if(v&0xf0f0) j|=4;
+    if(v&0xcccc) j|=2;
+    if(v&0xaaaa) j|=1;
+    return(j);
+}
+
+static int dz_highbit(int v) // angrylion deltaz_comparator_lut
+{
+    int k;
+    for(k=15;k>=0;k--) if(v&(1<<k)) return(1<<k);
+    return(0);
+}
+
+// z test (z<0: the primitive has no depth), angrylion z_compare: a pixel
+// within the larger of the two depth slopes counts as nearer, so of two
+// surfaces in one plane the later one wins, as on the console. (Strictly
+// nearer, coplanar pieces fought over their pixels.) Coverage isn't kept
+// here, so the coverage-overflow branches take their no-overflow side.
 static int ztest(int x,int y,int z)
 {
-    int old;
+    dword a;
+    int   word,oz,rawdzmem,dzmem,dznew,precision,force=0,diff,nearer,farther,max;
     if(z<0 || !Z_COMPARE) return(1);
-    old=zdecompress(rd16(zaddress(x,y)));
-    return(ZMODE==3?z<=old:z<old);
+    a=zaddress(x,y);
+    word=rd16(a);
+    oz=zdecompress(word);
+    rawdzmem=((word&3)<<2)|zhidden[(a>>1)&0x3fffff];
+    dzmem=1<<rawdzmem;
+    precision=(word>>13)&0xf;
+    if(precision<3)
+    {
+        if(dzmem!=0x8000)
+        {
+            int mod=16>>precision;
+            dzmem<<=1;
+            if(dzmem<mod) dzmem=mod;
+        }
+        else { force=1; dzmem=0xffff; }
+    }
+    dznew=dz_highbit((rs.dzpix|dzmem)&0xffff)<<3;
+    farther=force || z+dznew>=oz;
+    diff=z-dznew;
+    nearer=force || diff<=oz;
+    max=(oz==0x3ffff);
+    switch(ZMODE)
+    {
+    case 2:  return(z<oz || max);           // transparent
+    case 3:  return(farther && nearer && !max); // decal
+    default: return(max || nearer);         // opaque, interpenetrating
+    }
 }
 
 static void zwrite(int x,int y,int z)
 {
-    if(z>=0 && Z_UPDATE) wr16(zaddress(x,y),zcompress(z));
+    if(z>=0 && Z_UPDATE)
+    {
+        dword a=zaddress(x,y);
+        int   enc=dz_compress(rs.dzpix&0xffff);
+        wr16(a,zcompress(z)|(enc>>2));
+        zhidden[(a>>1)&0x3fffff]=(byte)(enc&3);
+    }
 }
 
 /****************************************************************************
@@ -537,6 +613,7 @@ static void shadepixel(int x,int y,const Color *shade,int s,int t,int sn,int tn,
 // rectangles have only the primitive depth
 static int rectz(void)
 {
+    rs.dzpix=rs.primdz;
     return(Z_SOURCE?rs.primz:-1);
 }
 
@@ -688,6 +765,15 @@ static void triangle(const dword *w)
     { // depth: z, dz/dx, dz/de, dz/dy as s15.16
         zb=w+n;
         z=(int)zb[0]/65536.0; zdx=(int)zb[1]/65536.0; zde=(int)zb[2]/65536.0;
+    }
+    // depth slope for the z test (angrylion spans_dzpix): |dz/dx|+|dz/dy|
+    if(Z_SOURCE) rs.dzpix=rs.primdz;
+    else if(zb)
+    {
+        int dx=(int)((zb[1]>>16)&0xffff),dy=(int)((zb[3]>>16)&0xffff);
+        if(dx&0x8000) dx=(~dx)&0x7fff;
+        if(dy&0x8000) dy=(~dy)&0x7fff;
+        rs.dzpix=dz_normalize((dx+dy)&0xffff)&0xffff;
     }
     if(sh) for(i=0;i<4;i++)
     {
@@ -902,8 +988,9 @@ void softrdp_cmd(const dword *w,int words)
         rs.k[2]=((w[0]&15)<<5)|(w[1]>>27);
         rs.k[3]=(w[1]>>18)&0x1ff; rs.k[4]=(w[1]>>9)&0x1ff; rs.k[5]=w[1]&0x1ff;
         break;
-    case 0x2e: // SET_PRIM_DEPTH: 15-bit z (and dz, unused)
+    case 0x2e: // SET_PRIM_DEPTH: 15-bit z and delta z
         rs.primz=((w[1]>>16)&0x7fff)<<3;
+        rs.primdz=w[1]&0xffff;
         break;
     case 0x2d: // SET_SCISSOR
         rs.sxh=(w[0]>>12)&0xfff; rs.syh=w[0]&0xfff;

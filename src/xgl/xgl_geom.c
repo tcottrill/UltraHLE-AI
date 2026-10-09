@@ -112,6 +112,18 @@ void xgl_applydepth(void)
     float b=-2.0f*f*n/(f-n);
     glUniform1f(xg.u_deptha,a);
     glUniform1f(xg.u_depthb,b*xg.zdecal);
+    glUniform2f(xg.u_flip,xg.flipx?-1.0f:1.0f,xg.flipy?-1.0f:1.0f);
+}
+
+// A viewport with a negative scale shows its picture mirrored (Ridge Racer
+// 64's rear-view mirror: x scale -62). GL takes only a positive size, so
+// the vertices are mirrored inside it instead.
+void x_viewflip(int fx,int fy)
+{
+    if(fx==xg.flipx && fy==xg.flipy) return;
+    x_flush();
+    xg.flipx=fx;
+    xg.flipy=fy;
 }
 
 // In XFORM_MODE_NONE only the depth range of the projection matters.
@@ -227,6 +239,15 @@ static int assemble(xgl_assembler *as,const xgl_vertex *v,xgl_vertex out[6])
 ** perspective ones through 1/w, color and raw z linearly as the shader does.
 */
 
+// x more than a tenth of the corners' range outside it (and more than a
+// trace when they are all equal)
+static int outside3(float x,float a,float b,float c)
+{
+    float lo=fminf(a,fminf(b,c)),hi=fmaxf(a,fmaxf(b,c));
+    float slack=0.1f*(hi-lo)+1e-4f*fmaxf(fabsf(lo),fabsf(hi))+1e-6f;
+    return x<lo-slack || x>hi+slack;
+}
+
 static void growtri(xgl_vertex *v)
 {
     float hw=0.5f*(float)(xg.view_x1-xg.view_x0+1);
@@ -241,7 +262,7 @@ static void growtri(xgl_vertex *v)
         if(!(v[i].w>1e-6f)) return; // crossing the eye plane: as it is
         px[i]=v[i].x/v[i].w*hw;
         py[i]=v[i].y/v[i].w*hh;
-        if(v[i].zs<0.0f) rawz=0;
+        if(!X_HASZS(v[i].zs)) rawz=0;
     }
     area=(px[1]-px[0])*(py[2]-py[0])-(px[2]-px[0])*(py[1]-py[0]);
     if(fabsf(area)<1e-4f) return;
@@ -298,7 +319,7 @@ static void growtri(xgl_vertex *v)
         o[i].y=iy*o[i].w;
         o[i].s1=o[i].t1=o[i].s2=o[i].t2=0.0f;
         o[i].r=o[i].g=o[i].b=o[i].a=0.0f;
-        o[i].zs=rawz?0.0f:-1.0f;
+        o[i].zs=rawz?0.0f:X_ZFROMW;
         for(j=0;j<3;j++)
         {
             float p=kw[j]/sum;
@@ -308,6 +329,15 @@ static void growtri(xgl_vertex *v)
             o[i].b +=b[j]*v[j].b; o[i].a+=b[j]*v[j].a;
             if(rawz) o[i].zs+=b[j]*v[j].zs;
         }
+        // A wall seen edge-on changes depth steeply across it (Mace's book
+        // pages: two layers a pixel apart, w 995 and 1008); grown 0.4 pixel
+        // its depth went far outside its own range and a dotted line of the
+        // backdrop showed along the page's diagonal. Such a triangle stays as
+        // it is. (Clamping the corners to the old values instead squeezed
+        // every grown triangle's texture by the rim: Pokémon Stadium's Game
+        // Pak Check pictures came out jagged.)
+        if(outside3(o[i].w,v[0].w,v[1].w,v[2].w)) return;
+        if(rawz && outside3(o[i].zs,v[0].zs,v[1].zs,v[2].zs)) return;
     }
     v[0]=o[0]; v[1]=o[1]; v[2]=o[2];
 }
@@ -344,7 +374,7 @@ void x_vx(xt_pos *p,xt_data *d)
     v.s1=d->t1s; v.t1=d->t1t;
     v.s2=d->t2s; v.t2=d->t2t;
     v.zs=d->zs;
-    d->zs=-1.0f; // per vertex: the next one takes its depth from w again
+    d->zs=X_ZFROMW; // per vertex: the next one takes its depth from w again
     if(d->t1clamp) memcpy(v.c1,d->t1c,sizeof(v.c1));
     else { v.c1[0]=v.c1[1]=1.0f; v.c1[2]=v.c1[3]=0.0f; }
     d->t1clamp=0;

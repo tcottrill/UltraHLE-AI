@@ -50,6 +50,8 @@ typedef struct
     GLuint prog;
     GLint  u_tex1,u_tex2,u_rgbmode,u_alphamode,u_texmode,u_env,u_alpharef;
     GLint  u_fogmode,u_fogmin,u_fogmax,u_fogcolor,u_deptha,u_depthb;
+    GLint  u_flip;          // x/y mirror inside the viewport (x_viewflip)
+    int    flipx,flipy;
 
     // geometry
     GLuint        vao,vbo;
